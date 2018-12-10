@@ -1,0 +1,14 @@
+Source: NAME
+Version: VERSION
+Priority: optional
+Maintainer: Vitaly Perov <vitperov@gmail.com>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.1.2
+Package: NAME
+Section: net
+Architecture: all
+Depends: bash (>= 4.0)
+Description: Bind your local port to external server
+ <b> vt-tunnel </b> ssh tunnel that allows you to bind you local
+ ports (http-server, ssh and etc) to your remote server with
+ external IP and domain name
