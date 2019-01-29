@@ -10,12 +10,10 @@ CFG_DIR=/etc/systemd/system/
 CONTROL=control
 CHANGELOG=changelog
 COPYRIGHT=copyright
-VERSION=0.1.1
+VERSION=1.0.1
 ROOT_DIR=`pwd`
 
-ARCH=$1
-
-PACKAGE_DIR=$ROOT_DIR/$BUILD_DIR/package-"$ARCH"/$PROJ_NAME
+PACKAGE_DIR=$ROOT_DIR/$BUILD_DIR/$PROJ_NAME
 PACKAGE_CTRL_DIR=$PACKAGE_DIR/DEBIAN
 PACKAGE_DOC_DIR=$PACKAGE_DIR/usr/share/doc/$PROJ_NAME
 
@@ -25,6 +23,7 @@ PACKAGE_DOC_DIR=$PACKAGE_DIR/usr/share/doc/$PROJ_NAME
 chmod -R 777 $PACKAGE_DIR
 rm -rf $PACKAGE_DIR
 
+mkdir -p $PACKAGE_DIR
 mkdir -p $PACKAGE_CTRL_DIR
 mkdir -p $PACKAGE_DIR/$CFG_DIR
 mkdir -p $PACKAGE_DIR/$INSTALL_DIR
@@ -34,7 +33,6 @@ cp $ROOT_DIR/$CONTROL $PACKAGE_CTRL_DIR/control
 cd $PACKAGE_CTRL_DIR/
 sed -i "s/NAME/$PROJ_NAME/g" control
 sed -i "s/VERSION/$VERSION/g" control
-sed -i "s/ARCH/$ARCH/g" control
 
 cp $ROOT_DIR/$SERVICE_CFG $PACKAGE_DIR/$CFG_DIR
 cp $ROOT_DIR/$SERVICE_NAME $PACKAGE_DIR/$INSTALL_DIR
@@ -52,7 +50,7 @@ echo "${CFG_DIR}${SERVICE_CFG}" > $PACKAGE_CTRL_DIR/conffiles
 #echo "sudo systemctl daemon-reload" > $PACKAGE_CTRL_DIR/triggers
 #echo "sudo systemctl start $SERVICE_NAME" >> $PACKAGE_CTRL_DIR/triggers
 
-cd $ROOT_DIR/$BUILD_DIR/package-"$ARCH"/
+cd $ROOT_DIR/$BUILD_DIR/
 fakeroot dpkg-deb -b $PROJ_NAME
 
 #mkdir -p $PACKAGE_DEST_DIR
