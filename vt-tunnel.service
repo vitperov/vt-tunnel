@@ -4,8 +4,8 @@ After=multi-user.target network.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/systemd/system/vt-tunnel.cfg
-ExecStart=/usr/bin/sudo su -s /bin/bash -c 'ssh -N -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
+ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
 Restart=always
-RestartSec=3
+RestartSec=30
 [Install]
 WantedBy=multi-user.target

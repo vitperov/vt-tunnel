@@ -10,7 +10,7 @@ CFG_DIR=/etc/systemd/system/
 CONTROL=control
 CHANGELOG=changelog
 COPYRIGHT=copyright
-VERSION=1.0.1
+VERSION=1.1.0
 ROOT_DIR=`pwd`
 
 PACKAGE_DIR=$ROOT_DIR/$BUILD_DIR/$PROJ_NAME
