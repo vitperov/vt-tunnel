@@ -3,6 +3,7 @@
 
 PROJ_NAME=vt-tunnel
 BUILD_DIR=build
+ARCH=all
 SERVICE_NAME=vt-tunnel.service
 SERVICE_CFG=vt-tunnel.cfg
 INSTALL_DIR=/lib/systemd/system/
