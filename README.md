@@ -29,7 +29,8 @@ no third-party tunnel services.
 
 - Debian/Ubuntu with systemd
 - `autossh` (pulled in automatically with the package)
-- ssh key at `~/.ssh/id_rsa` that can access your server without a password
+- **passwordless ssh access to your server** — the daemon runs unattended
+  and can't type passwords. See Quick start below.
 
 ## Installation (Debian/Ubuntu)
 
@@ -42,6 +43,43 @@ sudo dpkg -i package-vt-tunnel_1.1.2_all.deb
 This installs:
 - `vt-tunnel.service` — systemd unit
 - `/etc/systemd/vt-tunnel.cfg` — config file
+
+## Quick start
+
+0. If you haven't yet, copy your ssh key to the server — the tunnel runs
+   unattended, so access must be passwordless:
+
+   ```bash
+   ssh-copy-id user_on_your_server@myserver.com
+   ```
+
+1. Edit `/etc/systemd/vt-tunnel.cfg`:
+
+   ```bash
+   RUN_DAEMON_USER=your_local_user
+
+   REMOTE_USER=user_on_your_server
+   REMOTE_SERVER=myserver.com
+   REMOTE_SSH_PORT=22
+
+   LOCAL_PORT1=22
+   REMOTE_PORT1=5001
+   ```
+
+   With this config, port `22` on this machine shows up as port `5001`
+   on `myserver.com`.
+
+2. Enable and start the service:
+
+   ```bash
+   sudo systemctl enable --now vt-tunnel
+   ```
+
+3. From anywhere, connect back:
+
+   ```bash
+   ssh -p 5001 your_local_user@myserver.com
+   ```
 
 ## Building from source
 
@@ -59,3 +97,7 @@ cd daemon
 ```
 
 The package lands in `daemon/build/`.
+
+## License
+
+[MIT](LICENSE)
