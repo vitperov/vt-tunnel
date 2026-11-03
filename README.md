@@ -98,6 +98,19 @@ cd daemon
 
 The package lands in `daemon/build/`.
 
+## Future plans
+
+vt-tunnel is functional but minimal. What's on the roadmap:
+
+- **Multiple ports.** Right now the config accepts a single `LOCAL_PORT1` /
+  `REMOTE_PORT1` pair. Planned: any number of pairs (`LOCAL_PORT2`,
+  `REMOTE_PORT2`, ...), so one tunnel can expose SSH alongside a web UI,
+  or a VNC/RDP remote desktop.
+- **Config GUI.** Editing `/etc/systemd/vt-tunnel.cfg` by hand works,
+  but a small desktop app for editing it (and toggling the service)
+  would make setup friendlier — especially on a prototype at a
+  customer's site.
+
 ## License
 
 [MIT](LICENSE)
