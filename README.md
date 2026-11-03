@@ -1,13 +1,6 @@
 # vt-tunnel
 
-<p align="center">
-  <img src="doc/tunnel-logo.png" alt="vt-tunnel logo" width="250">
-</p>
-
-<p align="center">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
-  <img alt="Debian package" src="https://img.shields.io/badge/package-v1.1.0-blue.svg">
-</p>
+![vt-tunnel logo](doc/tunnel-logo.png)
 
 ## About
 
@@ -31,3 +24,38 @@ your server. From that moment you can connect *back* through the server —
 from the office, from home, from anywhere — straight to the machine
 behind the NAT. No public IP on your machine, no router port forwarding,
 no third-party tunnel services.
+
+## Requirements
+
+- Debian/Ubuntu with systemd
+- `autossh` (pulled in automatically with the package)
+- ssh key at `~/.ssh/id_rsa` that can access your server without a password
+
+## Installation (Debian/Ubuntu)
+
+Download the latest `.deb` from [Releases](https://github.com/vitperov/vt-tunnel/releases), then:
+
+```bash
+sudo dpkg -i package-vt-tunnel_1.1.2_all.deb
+```
+
+This installs:
+- `vt-tunnel.service` — systemd unit
+- `/etc/systemd/vt-tunnel.cfg` — config file
+
+## Building from source
+
+Requires `fakeroot` and `lintian`:
+
+```bash
+sudo apt install fakeroot lintian
+```
+
+Then:
+
+```bash
+cd daemon
+./buildDebianDaemon.sh
+```
+
+The package lands in `daemon/build/`.
