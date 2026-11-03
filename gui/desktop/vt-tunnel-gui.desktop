@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=vt-tunnel-gui
+Comment=GUI manager for vt-tunnel settings
+Exec=vt-tunnel-gui
+Terminal=false
+Categories=Network;Settings;
+Keywords=vt-tunnel;tunnel;ssh;
