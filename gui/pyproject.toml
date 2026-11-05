@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "GUI manager for vt-tunnel settings"
 requires-python = ">=3.11"
 
+[project.scripts]
+vt-tunnel-gui = "vt_tunnel_gui.app:main"
+
 [dependency-groups]
 dev = ["PyQt6"]
 
