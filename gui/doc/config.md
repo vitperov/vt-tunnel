@@ -23,12 +23,14 @@ Format (systemd `EnvironmentFile=`):
 
 ## Keys
 
-The file describes one connection (one tunnel pair); support for
-multiple connections is being prepared:
+The file holds a list of connections (tunnel pairs). `EnvironmentFile=`
+has no lists, so every key of a connection carries the connection's
+number as a suffix, starting at 1: `NAME1`, `ENABLED1`, ..., `NAME2`,
+`ENABLED2`, ... The fields of one connection:
 
-| key | example | meaning |
+| key (+ number) | example | meaning |
 |---|---|---|
-| `NAME` | `home` | connection name, shown in the GUI's connection list |
+| `NAME` | `home` | connection name, shown in the GUI's connection list; unique |
 | `ENABLED` | `false` | **dead** — nothing consumes it; kept only for conffile-upgrade compatibility. Enable/disable via `systemctl enable/disable --now vt-tunnel` instead |
 | `RUN_DAEMON_USER` | `username` | local user the tunnel runs as |
 | `REMOTE_USER` | `vasya` | SSH user on the remote server |
@@ -36,10 +38,39 @@ multiple connections is being prepared:
 | `LOCAL_PORT` | `22` | local port to expose |
 | `REMOTE_PORT` | `5001` | port bound on the remote server, forwarding back to `LOCAL_PORT` |
 
+Example with two connections, as written by the GUI:
+
+    # ===== Connection 1: home =====
+    NAME1=home
+    ENABLED1=true
+    RUN_DAEMON_USER1=username
+    REMOTE_USER1=vasya
+    REMOTE_SERVER1=vasya.com
+    LOCAL_PORT1=22
+    REMOTE_PORT1=5001
+
+    # ===== Connection 2: office =====
+    NAME2=office
+    ...
+
+Reading and writing rules:
+
+- The number is a positive integer without leading zeros (`NAME01` and
+  `NAME0` are not connection keys). Connections are ordered by number;
+  gaps are allowed. A field missing from a connection is empty.
+- On write, connections are renumbered 1..N in list order: deleting
+  connection 2 turns connection 3 into connection 2. Each connection is
+  preceded by a `# ===== Connection N: name =====` comment; these
+  delimiters are regenerated on every write.
+- Any other line — other keys, un-numbered keys such as `NAME=`, user
+  comments — is kept verbatim at the top of the file; comments next to
+  connection keys (including inline ones) are not kept.
+
 The machine-readable counterpart of this table is
 `src/vt_tunnel_gui/config_schema.py` — authoritative for the validation
-rules (types, ranges, allowed charset). Keys not listed there must be
-preserved verbatim when the file is rewritten; comments need not be.
+rules (types, ranges, allowed charset). Keys that are not numbered
+schema keys must be preserved verbatim when the file is rewritten;
+comments need not be.
 
 ## Validation constraints
 

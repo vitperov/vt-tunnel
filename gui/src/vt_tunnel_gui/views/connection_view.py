@@ -1,4 +1,4 @@
-"""Connection editor window: one input per config key plus Update/Reset.
+"""Connection editor window: one input per field, Update/Reset/Delete.
 
 The view is passive: it knows how to show and collect values, but does
 not validate them or decide what the buttons do — it only emits signals
@@ -30,6 +30,7 @@ BOOL_FALSE = "false"
 STATUS_TIMEOUT_MS = 5000
 
 WINDOW_TITLE = "Edit connection"
+NEW_WINDOW_TITLE = "New connection"
 # Wide enough for the default config path in the "Saved ..." status.
 INITIAL_WIDTH = 460
 
@@ -42,18 +43,24 @@ def is_true(value: str) -> bool:
 class ConnectionView(QDialog):
     """Modal editor for the fields of one connection.
 
+    In "new" mode (a connection not saved yet) there is nothing to delete,
+    so the Delete button is hidden.
+
     Values are exchanged as ``dict[str, str]`` keyed by config key, holding
     the raw strings as they appear in the cfg file.
     """
 
     update_requested = pyqtSignal()
     reset_requested = pyqtSignal()
+    delete_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(WINDOW_TITLE)
         self.setModal(True)
 
+        self._is_new = False
+        self._name = ""
         self._checkboxes: dict[str, QCheckBox] = {}
         self._line_edits: dict[str, QLineEdit] = {}
 
@@ -68,8 +75,12 @@ class ConnectionView(QDialog):
         self.reset_button = buttons.addButton(
             "Reset", QDialogButtonBox.ButtonRole.ResetRole
         )
+        self.delete_button = buttons.addButton(
+            "Delete", QDialogButtonBox.ButtonRole.DestructiveRole
+        )
         self.update_button.clicked.connect(self.update_requested)
         self.reset_button.clicked.connect(self.reset_requested)
+        self.delete_button.clicked.connect(self.delete_requested)
 
         self._status_bar = QStatusBar()
         self._status_bar.setSizeGripEnabled(False)
@@ -85,6 +96,7 @@ class ConnectionView(QDialog):
         # register it and drops it as soon as the button loses focus.
         self.update_button.setDefault(True)
         self.reset_button.setAutoDefault(False)
+        self.delete_button.setAutoDefault(False)
 
         self.resize(INITIAL_WIDTH, self.sizeHint().height())
 
@@ -117,8 +129,23 @@ class ConnectionView(QDialog):
             checkbox.setChecked(is_true(values.get(key, "")))
         for key, line_edit in self._line_edits.items():
             line_edit.setText(values.get(key, ""))
-        name = values.get(config_schema.NAME.key, "")
-        self.setWindowTitle(f"{WINDOW_TITLE}: {name}" if name else WINDOW_TITLE)
+        self._name = values.get(config_schema.NAME.key, "")
+        self._update_title()
+
+    def set_new(self, is_new: bool) -> None:
+        """Switch between editing a saved connection and a new one."""
+        self._is_new = is_new
+        self.delete_button.setVisible(not is_new)
+        self._update_title()
+
+    def _update_title(self) -> None:
+        if self._is_new:
+            title = NEW_WINDOW_TITLE
+        elif self._name:
+            title = f"{WINDOW_TITLE}: {self._name}"
+        else:
+            title = WINDOW_TITLE
+        self.setWindowTitle(title)
 
     def open_editor(self) -> None:
         """Show the window (or bring it to front if already shown)."""
@@ -126,6 +153,21 @@ class ConnectionView(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def close_editor(self) -> None:
+        self.accept()
+
+    def confirm_delete(self, name: str, path: Path) -> bool:
+        """Ask whether to delete connection ``name`` from ``path``."""
+        answer = QMessageBox.question(
+            self,
+            "Delete connection?",
+            f"Delete connection \"{name}\"?\n\n"
+            f"It will be removed from {path} right away.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def confirm_create(self, path: Path) -> bool:
         """Ask whether to create the missing config file ``path``."""

@@ -2,6 +2,9 @@
 
 Describes the keys of ``/etc/systemd/system/vt-tunnel.cfg`` — the
 authoritative source for their types, validation rules and semantics.
+The keys describe ONE connection; in the file, which holds a list of
+connections, each key carries the connection number as a suffix
+(``NAME1``, ``NAME2``, ...).
 The file format and the reasoning behind the rules live in
 ``doc/config.md``; parsing, validation and writing are NOT done here —
 they belong to the config model.

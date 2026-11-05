@@ -10,29 +10,38 @@ Format, as specified in ``doc/config.md``:
 
 Lines without ``=`` are ignored; if a key repeats, the last one wins.
 
-Values are validated against ``config_schema`` before anything is
-written: they end up inside the ``bash -c`` line of ``vt-tunnel.service``,
-so unvalidated values could inject shell commands.
+The file holds a list of connections. ``EnvironmentFile=`` has no lists,
+so each schema key carries the 1-based connection number as a suffix:
+``NAME1``, ``ENABLED1``, ..., ``NAME2``, ... On write, connections are
+numbered 1..N in list order (gaps close up) and each one is preceded by
+a delimiter comment. Other lines are kept verbatim.
+
+Values are validated before anything is written: they end up inside the
+``bash -c`` line of ``vt-tunnel.service``, so unvalidated values could
+inject shell commands.
 """
 
 import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
 from vt_tunnel_gui import config_schema
-from vt_tunnel_gui.config_schema import CfgField, FieldType
+from vt_tunnel_gui.models.connection import COMMENT_CHAR, Connection
 
-COMMENT_CHAR = "#"
 NEW_FILE_MODE = 0o644  # dpkg conffile, root-owned, world-readable
 
-_PORT_RE = re.compile(r"[0-9]+")  # ASCII digits only; int() is too lenient
-_IDENTIFIER_RE = re.compile(config_schema.IDENTIFIER_PATTERN)
-# Can't be stored in a value: they would end it early, or be lost or
-# mangled when the file is read back.
-_UNSTORABLE_CHARS = ("\n", "\r", "\0", COMMENT_CHAR)
+# KEY + connection number without leading zeros (NAME1, LOCAL_PORT12).
+_NUMBERED_KEY_RE = re.compile(r"([A-Z_]+)([1-9][0-9]*)")
+# Delimiter comment written before each connection; recognised (and
+# regenerated) on rewrite.
+_DELIMITER_RE = re.compile(r"#\s*=+\s*Connection\s+[0-9]+\b.*")
+
+
+def delimiter(number: int, connection: Connection) -> str:
+    return f"# ===== Connection {number}: {connection.name} ====="
 
 
 class ValidationError(ValueError):
@@ -43,30 +52,8 @@ class ValidationError(ValueError):
         self.errors = errors
 
 
-def _field_error(field: CfgField, value: str) -> str | None:
-    if field.type is FieldType.PORT:
-        if not _PORT_RE.fullmatch(value) or not (
-            config_schema.PORT_MIN <= int(value) <= config_schema.PORT_MAX
-        ):
-            return (
-                f"{field.key}: must be an integer from "
-                f"{config_schema.PORT_MIN} to {config_schema.PORT_MAX}"
-            )
-    elif field.type is FieldType.IDENTIFIER:
-        if not _IDENTIFIER_RE.fullmatch(value):
-            return (
-                f"{field.key}: must be non-empty, contain only "
-                "letters, digits, '.', '-' and '_', and not start with '-'"
-            )
-    elif value != value.strip() or any(c in value for c in _UNSTORABLE_CHARS):
-        # No schema rule (e.g. the dead ENABLED key): only make sure the
-        # value survives a write/read round trip.
-        return f"{field.key}: contains characters that can't be stored"
-    return None
-
-
 class TunnelConfig:
-    """Reads and writes one vt-tunnel config file."""
+    """Reads and writes the connections of one vt-tunnel config file."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -78,51 +65,102 @@ class TunnelConfig:
     def exists(self) -> bool:
         return self._path.exists()
 
-    def read(self) -> dict[str, str]:
-        """Return all ``{KEY: VALUE}`` pairs of the file.
+    # ---------------------------------------------------------------- read
 
+    def read(self) -> list[Connection]:
+        """Return the connections of the file, ordered by their number.
+
+        Fields missing from the file are empty. Keys that are not numbered
+        schema keys are ignored (and kept verbatim by :meth:`write`).
         ``OSError`` (e.g. ``FileNotFoundError``) propagates to the caller.
         """
         text = self._path.read_text(encoding="utf-8-sig", errors="replace")
-        return self.parse(text)
+        return self.connections_from(self.parse(text))
 
     @staticmethod
-    def validate(values: Mapping[str, str]) -> list[str]:
-        """Check ``values`` against the schema; return the error messages.
+    def parse(text: str) -> dict[str, str]:
+        """Parse config text into a flat ``{KEY: VALUE}`` dict."""
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            key, value = TunnelConfig._split_line(line)
+            if key is not None:
+                values[key] = value
+        return values
 
-        Every schema key is required and no other key is accepted. An
-        empty list means ``values`` can be written.
+    @staticmethod
+    def connections_from(flat: dict[str, str]) -> list[Connection]:
+        """Group numbered keys (``NAME1``...) into connections by number."""
+        by_number: dict[int, dict[str, str]] = {}
+        for key, value in flat.items():
+            split = TunnelConfig._split_numbered_key(key)
+            if split is not None:
+                field_key, number = split
+                by_number.setdefault(number, {})[field_key] = value
+        return [Connection(by_number[n]) for n in sorted(by_number)]
+
+    @staticmethod
+    def _split_line(line: str) -> tuple[str | None, str]:
+        """Return ``(key, value)`` of a line, or ``(None, "")`` if none."""
+        code = line.split(COMMENT_CHAR, 1)[0]
+        key, sep, value = code.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            return None, ""
+        return key, value.strip()
+
+    @staticmethod
+    def _split_numbered_key(key: str) -> tuple[str, int] | None:
+        """``"NAME12"`` -> ``("NAME", 12)``; None if not a connection key."""
+        match = _NUMBERED_KEY_RE.fullmatch(key)
+        if match is None or match[1] not in config_schema.FIELD_BY_KEY:
+            return None
+        return match[1], int(match[2])
+
+    # ------------------------------------------------------------ validate
+
+    @staticmethod
+    def validate(connections: Sequence[Connection]) -> list[str]:
+        """Check every connection; return the error messages (empty: OK).
+
+        Messages are prefixed with the connection's name — what the user
+        sees — or, if it has no valid name, its number. Names must be
+        unique.
         """
-        errors = [
-            f"{key!r}: unknown key"
-            for key in values
-            if key not in config_schema.FIELD_BY_KEY
-        ]
-        for field in config_schema.FIELDS:
-            if field.key not in values:
-                errors.append(f"{field.key}: missing")
-                continue
-            error = _field_error(field, values[field.key])
-            if error:
-                errors.append(error)
+        errors: list[str] = []
+        seen_names: set[str] = set()
+        for number, connection in enumerate(connections, start=1):
+            field_errors = connection.validate()
+            name_ok = not any(
+                e.startswith(f"{config_schema.NAME.key}:") for e in field_errors
+            )
+            if name_ok:
+                label = f'Connection "{connection.name}"'
+                if connection.name in seen_names:
+                    field_errors.insert(0, (
+                        f"{config_schema.NAME.key}: must be unique, "
+                        "another connection has this name"
+                    ))
+                seen_names.add(connection.name)
+            else:
+                label = f"Connection {number}"
+            errors.extend(f"{label}: {error}" for error in field_errors)
         return errors
 
-    def write(self, values: Mapping[str, str]) -> None:
-        """Set ``values`` in the file, creating it if it doesn't exist.
+    # --------------------------------------------------------------- write
 
-        ``values`` must pass :meth:`validate`, otherwise
+    def write(self, connections: Sequence[Connection]) -> None:
+        """Replace the connections in the file, creating it if missing.
+
+        ``connections`` must pass :meth:`validate`, otherwise
         :class:`ValidationError` is raised and nothing is written.
 
-        The existing file is edited rather than regenerated: lines of other
-        keys, comments and blank lines are kept verbatim. A line setting one
-        of ``values`` is replaced by a bare ``KEY=VALUE`` (duplicates are
-        dropped); keys not yet in the file are appended. The file is
-        replaced atomically and keeps its permission bits.
-
-        Raises :class:`ValidationError`, or ``OSError`` if the file can't
-        be read or written.
+        Lines that are not connection keys (other keys, comments) are kept
+        verbatim, at the top; the connections follow, numbered 1..N, each
+        after a delimiter comment. The file is replaced atomically and
+        keeps its permission bits. Raises ``OSError`` if the file can't be
+        read or written.
         """
-        errors = self.validate(values)
+        errors = self.validate(connections)
         if errors:
             raise ValidationError(errors)
 
@@ -136,43 +174,37 @@ class TunnelConfig:
         except FileNotFoundError:
             old_text = None
 
-        new_text = self._merge(old_text or "", values)
+        new_text = self.render(old_text or "", connections)
         self._atomic_write(target, new_text, exists=old_text is not None)
 
     @staticmethod
-    def parse(text: str) -> dict[str, str]:
-        values: dict[str, str] = {}
-        for line in text.splitlines():
-            key, value = TunnelConfig._split_line(line)
-            if key is not None:
-                values[key] = value
-        return values
+    def render(old_text: str, connections: Sequence[Connection]) -> str:
+        """Return the new file text: kept lines of ``old_text``, then the
+        connection blocks."""
+        kept = [
+            line for line in old_text.splitlines()
+            if not TunnelConfig._is_connection_line(line)
+        ]
+        sections = []
+        other = "\n".join(_squeeze_blank_lines(kept))
+        if other:
+            sections.append(other)
+        for number, connection in enumerate(connections, start=1):
+            lines = [delimiter(number, connection)]
+            lines += [
+                f"{field.key}{number}={connection[field.key]}"
+                for field in config_schema.FIELDS
+            ]
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections) + "\n" if sections else ""
 
     @staticmethod
-    def _split_line(line: str) -> tuple[str | None, str]:
-        """Return ``(key, value)`` of a line, or ``(None, "")`` if none."""
-        code = line.split(COMMENT_CHAR, 1)[0]
-        key, sep, value = code.partition("=")
-        key = key.strip()
-        if not sep or not key:
-            return None, ""
-        return key, value.strip()
-
-    @staticmethod
-    def _merge(old_text: str, values: Mapping[str, str]) -> str:
-        pending = dict(values)
-        lines: list[str] = []
-        for line in old_text.splitlines():
-            key, _ = TunnelConfig._split_line(line)
-            if key in values:
-                # Inline comments on these lines are dropped on purpose:
-                # real systemd doesn't treat a mid-line '#' as a comment.
-                if key in pending:
-                    lines.append(f"{key}={pending.pop(key)}")
-                continue
-            lines.append(line)
-        lines.extend(f"{key}={value}" for key, value in pending.items())
-        return "".join(line + "\n" for line in lines)
+    def _is_connection_line(line: str) -> bool:
+        """A numbered key line or one of our delimiter comments."""
+        if _DELIMITER_RE.fullmatch(line.strip()):
+            return True
+        key, _ = TunnelConfig._split_line(line)
+        return key is not None and TunnelConfig._split_numbered_key(key) is not None
 
     @staticmethod
     def _atomic_write(target: Path, text: str, exists: bool) -> None:
@@ -212,3 +244,19 @@ class TunnelConfig:
             os.fsync(dir_fd)  # make the rename itself durable
         finally:
             os.close(dir_fd)
+
+
+def _squeeze_blank_lines(lines: list[str]) -> list[str]:
+    """Drop leading/trailing blank lines and collapse runs of them.
+
+    Removing the old connection blocks leaves their separating blank lines
+    behind; without this they would pile up on every save.
+    """
+    result: list[str] = []
+    for line in lines:
+        if not line.strip() and (not result or not result[-1].strip()):
+            continue
+        result.append(line)
+    while result and not result[-1].strip():
+        result.pop()
+    return result

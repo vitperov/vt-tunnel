@@ -1,71 +1,62 @@
-"""Config model for vt-tunnel-gui: loads, validates and saves the config."""
+"""Config model for vt-tunnel-gui: loads, validates and saves connections."""
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
-from vt_tunnel_gui import config_schema
+from vt_tunnel_gui.models.connection import Connection
 from vt_tunnel_gui.models.tunnel_config import TunnelConfig, ValidationError
 
-__all__ = ["Model", "ValidationError"]
+__all__ = ["Connection", "Model", "ValidationError"]
 
 log = logging.getLogger(__name__)
 
 
 class Model:
-    """Holds the config values of one :class:`TunnelConfig` file."""
+    """Holds the list of connections of one :class:`TunnelConfig` file.
+
+    A connection's number in the file is just its position in the list;
+    it isn't stored, so removing one renumbers the following ones on save.
+    """
 
     def __init__(self, config: TunnelConfig) -> None:
         self._config = config
-        self._values = self._empty_values()
+        self._connections: list[Connection] = []
 
     @property
     def config_path(self) -> Path:
         return self._config.path
 
-    @staticmethod
-    def _empty_values() -> dict[str, str]:
-        return {field.key: "" for field in config_schema.FIELDS}
-
-    def load(self) -> None:
-        """(Re)read the config file.
-
-        Keys known to the schema are taken from the file; keys missing from
-        it are empty. If the file can't be read (e.g. it doesn't exist), all
-        values are empty.
-        """
-        values = self._empty_values()
-        try:
-            parsed = self._config.read()
-        except FileNotFoundError:
-            log.warning("Config file not found: %s", self.config_path)
-        except OSError as err:
-            log.warning("Can't read config file %s: %s", self.config_path, err)
-        else:
-            for key in values:
-                if key in parsed:
-                    values[key] = parsed[key]
-        self._values = values
-
-    def values(self) -> dict[str, str]:
-        """Return a copy of the current config values."""
-        return dict(self._values)
-
     def config_exists(self) -> bool:
         return self._config.exists()
 
-    @staticmethod
-    def validate(values: dict[str, str]) -> list[str]:
-        """Return one error message per invalid value (empty if OK)."""
-        return TunnelConfig.validate(values)
+    def load(self) -> None:
+        """(Re)read the connections from the config file.
 
-    def save(self, values: dict[str, str]) -> None:
-        """Write the schema keys of ``values`` to the config file.
+        If the file can't be read (e.g. it doesn't exist), there are none.
+        """
+        try:
+            self._connections = self._config.read()
+        except FileNotFoundError:
+            log.warning("Config file not found: %s", self.config_path)
+            self._connections = []
+        except OSError as err:
+            log.warning("Can't read config file %s: %s", self.config_path, err)
+            self._connections = []
+
+    def connections(self) -> list[Connection]:
+        """Return a copy of the list (Connections themselves are immutable)."""
+        return list(self._connections)
+
+    @staticmethod
+    def validate(connections: Sequence[Connection]) -> list[str]:
+        """Return the error messages for ``connections`` (empty if OK)."""
+        return TunnelConfig.validate(connections)
+
+    def save(self, connections: Sequence[Connection]) -> None:
+        """Write ``connections`` to the config file, numbered in order.
 
         Raises :class:`ValidationError` (nothing is written) or ``OSError``.
         """
-        schema_values = {
-            field.key: values.get(field.key, "")
-            for field in config_schema.FIELDS
-        }
-        self._config.write(schema_values)
-        self._values = schema_values
+        self._config.write(connections)
+        self._connections = list(connections)

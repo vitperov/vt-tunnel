@@ -1,6 +1,9 @@
 """Tests of TunnelConfig: reading, validating and writing vt-tunnel.cfg.
 
-File format and validation rules: doc/config.md and config_schema.py.
+The file holds a list of connections with numbered keys (NAME1, NAME2,
+...). File format and validation rules: doc/config.md, config_schema.py.
+Per-field rules are tested in detail in test_connection.py; here they are
+checked through the file (read, validate, write).
 """
 
 import os
@@ -9,8 +12,19 @@ from pathlib import Path
 
 import pytest
 
-from conftest import IDENTIFIER_KEYS, PORT_KEYS, VALID_VALUES, cfg_text
+from conftest import (
+    DANGEROUS_IDENTIFIERS,
+    DANGEROUS_PORTS,
+    IDENTIFIER_KEYS,
+    LEADING_DASH_IDENTIFIERS,
+    OTHER_VALUES,
+    OUT_OF_RANGE_PORTS,
+    PORT_KEYS,
+    VALID_VALUES,
+    cfg_text,
+)
 from vt_tunnel_gui import config_schema
+from vt_tunnel_gui.models.connection import Connection
 from vt_tunnel_gui.models.tunnel_config import (
     NEW_FILE_MODE,
     TunnelConfig,
@@ -18,37 +32,28 @@ from vt_tunnel_gui.models.tunnel_config import (
 )
 
 
-def errors_for(values: dict[str, str]) -> dict[str, str]:
-    """``{key: message}`` of the validation errors of ``values``."""
-    return {
-        error.split(":", 1)[0]: error for error in TunnelConfig.validate(values)
-    }
-
-
-def assert_only_invalid(values: dict[str, str], key: str) -> None:
-    """``values`` is rejected, and ``key`` is the only offending key."""
-    assert list(errors_for(values)) == [key]
-
-
 def assert_write_rejected(
-    config: TunnelConfig, values: dict[str, str]
+    config: TunnelConfig, connections: list[Connection]
 ) -> None:
-    """Writing ``values`` raises and leaves the directory byte-identical."""
+    """Writing raises ValidationError and leaves the directory unchanged."""
     directory = config.path.parent
     before = {p.name: p.read_bytes() for p in directory.iterdir()}
     with pytest.raises(ValidationError):
-        config.write(values)
+        config.write(connections)
     after = {p.name: p.read_bytes() for p in directory.iterdir()}
     assert after == before  # file untouched, no temp files left behind
 
 
-def schema_subset(values: dict[str, str]) -> dict[str, str]:
-    """The schema keys of ``values`` (what the GUI would show and write)."""
-    return {k: v for k, v in values.items() if k in config_schema.FIELD_BY_KEY}
-
-
 def temp_leftovers(directory: Path) -> list[str]:
     return [p.name for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def block(number: int, values: dict[str, str]) -> str:
+    """The text the writer produces for one connection."""
+    return (
+        f"# ===== Connection {number}: {values['NAME']} =====\n"
+        + cfg_text(values, start=number)
+    )
 
 
 # --------------------------------------------------------------------------
@@ -74,47 +79,52 @@ class TestExistingAndMissingFile:
         with pytest.raises(IsADirectoryError):
             TunnelConfig(tmp_path).read()
 
-    def test_write_creates_missing_file(self, cfg_path, valid_values):
-        TunnelConfig(cfg_path).write(valid_values)
+    def test_write_creates_missing_file(self, cfg_path, valid, other):
+        TunnelConfig(cfg_path).write([valid, other])
 
-        assert cfg_path.read_text() == cfg_text(valid_values)
+        assert cfg_path.read_text() == (
+            block(1, VALID_VALUES) + "\n" + block(2, OTHER_VALUES)
+        )
         assert stat.S_IMODE(cfg_path.stat().st_mode) == NEW_FILE_MODE
         assert temp_leftovers(cfg_path.parent) == []
 
-    def test_write_then_read_round_trip(self, cfg_path, valid_values):
-        config = TunnelConfig(cfg_path)
-        config.write(valid_values)
-        assert config.read() == valid_values
+    def test_write_empty_list_to_missing_file(self, cfg_path):
+        TunnelConfig(cfg_path).write([])
+        assert cfg_path.read_text() == ""
+        assert TunnelConfig(cfg_path).read() == []
 
-    def test_write_existing_file_keeps_its_mode(
-        self, make_config, valid_values
-    ):
-        config = make_config(cfg_text(valid_values))
+    def test_write_then_read_round_trip(self, cfg_path, valid, other):
+        config = TunnelConfig(cfg_path)
+        config.write([valid, other])
+        assert config.read() == [valid, other]
+
+    def test_write_existing_file_keeps_its_mode(self, make_config, valid):
+        config = make_config(cfg_text(VALID_VALUES))
         os.chmod(config.path, 0o600)
 
-        config.write(valid_values | {"REMOTE_USER": "petya"})
+        changed = Connection(VALID_VALUES | {"REMOTE_USER": "petya"})
+        config.write([changed])
 
         assert stat.S_IMODE(config.path.stat().st_mode) == 0o600
-        assert config.read()["REMOTE_USER"] == "petya"
+        assert config.read() == [changed]
 
-    def test_write_through_symlink_updates_target(
-        self, tmp_path, valid_values
-    ):
+    def test_write_through_symlink_updates_target(self, tmp_path, valid):
         target = tmp_path / "real.cfg"
-        target.write_text(cfg_text(valid_values))
+        target.write_text(cfg_text(VALID_VALUES))
         link = tmp_path / "link.cfg"
         link.symlink_to(target)
 
-        TunnelConfig(link).write(valid_values | {"REMOTE_USER": "petya"})
+        changed = Connection(VALID_VALUES | {"REMOTE_USER": "petya"})
+        TunnelConfig(link).write([changed])
 
         assert link.is_symlink()
-        assert TunnelConfig(target).read()["REMOTE_USER"] == "petya"
+        assert TunnelConfig(target).read() == [changed]
 
     def test_failed_write_keeps_file_and_removes_temp_file(
-        self, make_config, valid_values, monkeypatch
+        self, make_config, valid, monkeypatch
     ):
         # Fail after the temp file was written (e.g. disk full, I/O error).
-        original = cfg_text(valid_values)
+        original = cfg_text(VALID_VALUES)
         config = make_config(original)
 
         def failing_replace(src, dst):
@@ -122,29 +132,29 @@ class TestExistingAndMissingFile:
 
         monkeypatch.setattr(os, "replace", failing_replace)
         with pytest.raises(OSError, match="No space left"):
-            config.write(valid_values | {"REMOTE_USER": "petya"})
+            config.write([valid])
 
         assert config.path.read_text() == original
         assert temp_leftovers(config.path.parent) == []
 
-    def test_write_into_missing_directory_raises(self, tmp_path, valid_values):
+    def test_write_into_missing_directory_raises(self, tmp_path, valid):
         config = TunnelConfig(tmp_path / "no" / "such" / "dir.cfg")
         with pytest.raises(FileNotFoundError):
-            config.write(valid_values)
+            config.write([valid])
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
     def test_write_without_permission_raises_and_keeps_file(
-        self, tmp_path, valid_values
+        self, tmp_path, valid
     ):
         directory = tmp_path / "ro"
         directory.mkdir()
         path = directory / "vt-tunnel.cfg"
-        path.write_text("ENABLED=false\n")
+        path.write_text("OTHER=1\n")
         directory.chmod(0o555)
         try:
             with pytest.raises(PermissionError):
-                TunnelConfig(path).write(valid_values)
-            assert path.read_text() == "ENABLED=false\n"
+                TunnelConfig(path).write([valid])
+            assert path.read_text() == "OTHER=1\n"
             assert temp_leftovers(directory) == []
         finally:
             directory.chmod(0o755)
@@ -156,70 +166,178 @@ class TestExistingAndMissingFile:
 
 
 DOC_EXAMPLE = """\
-# vt-tunnel configuration
-NAME=home
-ENABLED=false
-RUN_DAEMON_USER=username
-REMOTE_USER=vasya
-REMOTE_SERVER=vasya.com
-LOCAL_PORT=22
-REMOTE_PORT=5001
+# ===== Connection 1: home =====
+NAME1=home
+ENABLED1=false
+RUN_DAEMON_USER1=username
+REMOTE_USER1=vasya
+REMOTE_SERVER1=vasya.com
+LOCAL_PORT1=22
+REMOTE_PORT1=5001
+
+# ===== Connection 2: office =====
+NAME2=office
+ENABLED2=true
+RUN_DAEMON_USER2=username
+REMOTE_USER2=vasya
+REMOTE_SERVER2=office.example.com
+LOCAL_PORT2=8080
+REMOTE_PORT2=5002
 """
 
 
 class TestExpectedValues:
-    def test_read_doc_example(self, make_config):
-        config = make_config(DOC_EXAMPLE)
-        assert config.read() == VALID_VALUES
+    def test_read_doc_example(self, make_config, valid, other):
+        assert make_config(DOC_EXAMPLE).read() == [valid, other]
 
     def test_doc_example_is_valid(self, make_config):
         assert TunnelConfig.validate(make_config(DOC_EXAMPLE).read()) == []
 
-    @pytest.mark.parametrize("enabled", ["true", "false"])
-    def test_enabled_values(self, valid_values, enabled):
-        assert TunnelConfig.validate(valid_values | {"ENABLED": enabled}) == []
+    def test_writer_output_is_the_doc_example(self, cfg_path, valid, other):
+        TunnelConfig(cfg_path).write([valid, other])
+        assert cfg_path.read_text() == DOC_EXAMPLE
 
-    @pytest.mark.parametrize("key", PORT_KEYS)
-    @pytest.mark.parametrize(
-        "port", [str(config_schema.PORT_MIN), "443", str(config_schema.PORT_MAX)]
-    )
-    def test_port_range_boundaries_are_valid(self, valid_values, key, port):
-        assert TunnelConfig.validate(valid_values | {key: port}) == []
+    def test_empty_file_has_no_connections(self, make_config):
+        assert make_config("").read() == []
 
-    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize(
-        "value", ["a", "vasya", "VASYA_01", "my-host.example.com", "10.0.0.1"]
-    )
-    def test_identifier_charset_is_valid(self, valid_values, key, value):
-        assert TunnelConfig.validate(valid_values | {key: value}) == []
+    def test_empty_list_is_valid(self):
+        assert TunnelConfig.validate([]) == []
 
-    def test_whitespace_and_comments_are_not_part_of_values(self, make_config):
+    def test_whitespace_and_comments_are_not_part_of_values(
+        self, make_config, valid
+    ):
         config = make_config(
             "  # indented comment\n"
             "\n"
-            "NAME=home\n"
-            "ENABLED = false\n"
-            "RUN_DAEMON_USER=username   # trailing comment\n"
-            "\tREMOTE_USER=vasya\t\n"
-            "REMOTE_SERVER=vasya.com\n"
-            "LOCAL_PORT=22#no space before comment\n"
-            "REMOTE_PORT=5001\n"
+            "NAME1=home\n"
+            "ENABLED1 = false\n"
+            "RUN_DAEMON_USER1=username   # trailing comment\n"
+            "\tREMOTE_USER1=vasya\t\n"
+            "REMOTE_SERVER1=vasya.com\n"
+            "LOCAL_PORT1=22#no space before comment\n"
+            "REMOTE_PORT1=5001\n"
         )
-        assert config.read() == VALID_VALUES
+        assert config.read() == [valid]
 
-    def test_crlf_line_endings(self, cfg_path):
+    def test_crlf_line_endings(self, cfg_path, valid, other):
         cfg_path.write_bytes(DOC_EXAMPLE.replace("\n", "\r\n").encode())
-        assert TunnelConfig(cfg_path).read() == VALID_VALUES
+        assert TunnelConfig(cfg_path).read() == [valid, other]
 
-    def test_utf8_bom_is_ignored(self, cfg_path):
-        # BOM right before the first key (not a comment line), as written
-        # by some editors.
+    def test_utf8_bom_is_ignored(self, cfg_path, valid):
+        # BOM right before the first key, as written by some editors.
         cfg_path.write_bytes(b"\xef\xbb\xbf" + cfg_text(VALID_VALUES).encode())
-        assert TunnelConfig(cfg_path).read() == VALID_VALUES
+        assert TunnelConfig(cfg_path).read() == [valid]
 
-    def test_unknown_keys_are_read_too(self, make_config):
-        config = make_config(DOC_EXAMPLE + "OTHER_KEY=something\n")
-        assert config.read() == VALID_VALUES | {"OTHER_KEY": "something"}
+    def test_other_keys_are_not_connections(self, make_config, valid):
+        config = make_config(
+            "OTHER_KEY=something\n"
+            "NAME=unnumbered\n"  # schema key without number
+            + cfg_text(VALID_VALUES)
+        )
+        assert config.read() == [valid]
+
+
+# --------------------------------------------------------------------------
+# Connection numbering
+# --------------------------------------------------------------------------
+
+
+class TestNumbering:
+    def test_connections_are_ordered_by_number(self, make_config, valid, other):
+        # Connection 2 written first in the file.
+        config = make_config(cfg_text(OTHER_VALUES, start=2) + cfg_text(VALID_VALUES))
+        assert config.read() == [valid, other]
+
+    def test_numbers_sort_numerically_not_alphabetically(self, make_config):
+        config = make_config("NAME10=ten\nNAME9=nine\nNAME2=two\n")
+        assert [c.name for c in config.read()] == ["two", "nine", "ten"]
+
+    def test_gaps_are_allowed(self, make_config, valid, other):
+        config = make_config(
+            cfg_text(VALID_VALUES, start=3) + cfg_text(OTHER_VALUES, start=7)
+        )
+        assert config.read() == [valid, other]
+
+    def test_interleaved_keys_are_grouped(self, make_config):
+        config = make_config(
+            "NAME1=a\nNAME2=b\nLOCAL_PORT2=2\nLOCAL_PORT1=1\n"
+        )
+        assert [(c.name, c["LOCAL_PORT"]) for c in config.read()] == [
+            ("a", "1"), ("b", "2"),
+        ]
+
+    def test_partial_connection_has_empty_fields(self, make_config):
+        [connection] = make_config("LOCAL_PORT4=22\n").read()
+        assert connection == Connection({"LOCAL_PORT": "22"})
+
+    def test_large_number(self, make_config):
+        [connection] = make_config("NAME123456789012345678901=x\n").read()
+        assert connection.name == "x"
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            pytest.param("NAME0=x", id="zero"),
+            pytest.param("NAME01=x", id="leading-zero"),
+            pytest.param("NAME=x", id="no-number"),
+            pytest.param("NAME-1=x", id="negative"),
+            pytest.param("NAME1a=x", id="suffix-after-number"),
+            pytest.param("NAME_1=x", id="underscore-before-number"),
+            pytest.param("name1=x", id="lowercase"),
+            pytest.param("NAMES1=x", id="unknown-field"),
+            pytest.param("NAME\u0661=x", id="non-ascii-digit"),
+            # int() would read this as 11
+            pytest.param("NAME1\u0661=x", id="non-ascii-digit-after-ascii"),
+        ],
+    )
+    def test_not_a_connection_key(self, make_config, line):
+        assert make_config(line + "\n").read() == []
+
+    def test_duplicate_key_last_wins(self, make_config):
+        [connection] = make_config("NAME1=first\nNAME1=second\n").read()
+        assert connection.name == "second"
+
+
+# --------------------------------------------------------------------------
+# Validation of the list
+# --------------------------------------------------------------------------
+
+
+class TestValidateList:
+    def test_errors_name_the_connection(self, valid):
+        bad = Connection(OTHER_VALUES | {"LOCAL_PORT": "0"})
+        [error] = TunnelConfig.validate([valid, bad])
+        assert error.startswith('Connection "office": LOCAL_PORT:')
+
+    def test_without_valid_name_the_number_is_shown(self, valid):
+        bad = Connection(VALID_VALUES | {"NAME": "x;reboot"})
+        [error] = TunnelConfig.validate([valid, bad])
+        assert error.startswith("Connection 2: NAME:")
+
+    def test_errors_of_all_connections_are_reported(self):
+        first = Connection(VALID_VALUES | {"REMOTE_PORT": ""})
+        second = Connection(OTHER_VALUES | {"REMOTE_USER": "$x"})
+        errors = TunnelConfig.validate([first, second])
+        assert [e.split(": ")[:2] for e in errors] == [
+            ['Connection "home"', "REMOTE_PORT"],
+            ['Connection "office"', "REMOTE_USER"],
+        ]
+
+    def test_names_must_be_unique(self, valid):
+        duplicate = Connection(OTHER_VALUES | {"NAME": "home"})
+        [error] = TunnelConfig.validate([valid, duplicate])
+        assert error.startswith('Connection "home": NAME: must be unique')
+
+    def test_duplicate_name_is_not_written(self, make_config, valid):
+        config = make_config(cfg_text(VALID_VALUES))
+        assert_write_rejected(config, [valid, valid])
+
+    def test_invalid_connection_blocks_writing_the_others(
+        self, make_config, valid
+    ):
+        config = make_config(cfg_text(VALID_VALUES))
+        bad = Connection(OTHER_VALUES | {"REMOTE_PORT": "0"})
+        assert_write_rejected(config, [valid, bad])
 
 
 # --------------------------------------------------------------------------
@@ -227,50 +345,30 @@ class TestExpectedValues:
 # --------------------------------------------------------------------------
 
 
-OUT_OF_RANGE_PORTS = [
-    "0",
-    "-1",
-    "65536",
-    "70000",
-    "99999999999999999999",
-]
-
-
 class TestOutOfRangeValues:
     @pytest.mark.parametrize("key", PORT_KEYS)
     @pytest.mark.parametrize("port", OUT_OF_RANGE_PORTS)
-    def test_port_out_of_range_is_invalid(self, valid_values, key, port):
-        assert_only_invalid(valid_values | {key: port}, key)
-
-    @pytest.mark.parametrize("key", PORT_KEYS)
-    @pytest.mark.parametrize("port", OUT_OF_RANGE_PORTS)
     def test_out_of_range_port_in_file_is_read_verbatim_and_flagged(
-        self, make_config, valid_values, key, port
+        self, make_config, key, port
     ):
         # Reading never fails on bad values, so the user can see and fix
         # them; validation reports them.
-        values = make_config(cfg_text(valid_values | {key: port})).read()
-        assert values[key] == port
-        assert_only_invalid(values, key)
+        config = make_config(
+            cfg_text(VALID_VALUES, OTHER_VALUES | {key: port})
+        )
+        connections = config.read()
+        assert connections[1][key] == port
+        [error] = TunnelConfig.validate(connections)
+        assert error.startswith(f'Connection "office": {key}:')
 
     @pytest.mark.parametrize("key", PORT_KEYS)
     @pytest.mark.parametrize("port", OUT_OF_RANGE_PORTS)
     def test_out_of_range_port_is_not_written(
-        self, make_config, valid_values, key, port
+        self, make_config, valid, key, port
     ):
-        config = make_config(cfg_text(valid_values))
-        assert_write_rejected(config, valid_values | {key: port})
-
-    def test_error_message_names_the_allowed_range(self, valid_values):
-        message = errors_for(valid_values | {"LOCAL_PORT": "0"})["LOCAL_PORT"]
-        assert "1" in message and "65535" in message
-
-    def test_all_errors_are_reported_at_once(self, valid_values):
-        values = valid_values | {
-            "LOCAL_PORT": "65536",
-            "REMOTE_PORT": "-5",
-        }
-        assert sorted(errors_for(values)) == sorted(PORT_KEYS)
+        config = make_config(cfg_text(VALID_VALUES))
+        bad = Connection(OTHER_VALUES | {key: port})
+        assert_write_rejected(config, [valid, bad])
 
 
 # --------------------------------------------------------------------------
@@ -285,11 +383,11 @@ class TestMalformedSyntax:
             pytest.param("", {}, id="empty-file"),
             pytest.param("# only\n# comments\n", {}, id="only-comments"),
             pytest.param("\n\n   \n\t\n", {}, id="only-blank-lines"),
-            pytest.param("REMOTE_USER vasya\n", {}, id="no-equals-sign"),
-            pytest.param("REMOTE_USER\n", {}, id="key-only"),
-            pytest.param("=vasya\n", {}, id="empty-key"),
-            pytest.param("  =vasya\n", {}, id="blank-key"),
-            pytest.param("# REMOTE_USER=vasya\n", {}, id="commented-out"),
+            pytest.param("NAME1 home\n", {}, id="no-equals-sign"),
+            pytest.param("NAME1\n", {}, id="key-only"),
+            pytest.param("=home\n", {}, id="empty-key"),
+            pytest.param("  =home\n", {}, id="blank-key"),
+            pytest.param("# NAME1=home\n", {}, id="commented-out"),
             pytest.param("garbage\nA=1\n", {"A": "1"}, id="garbage-skipped"),
             pytest.param("A=1\nA=2\n", {"A": "2"}, id="duplicate-last-wins"),
             pytest.param("A=b=c\n", {"A": "b=c"}, id="equals-in-value"),
@@ -301,63 +399,54 @@ class TestMalformedSyntax:
             pytest.param("A=1", {"A": "1"}, id="no-final-newline"),
         ],
     )
-    def test_parse(self, make_config, text, expected):
-        assert make_config(text).read() == expected
+    def test_parse(self, text, expected):
+        assert TunnelConfig.parse(text) == expected
+
+    def test_quoted_value_is_kept_and_flagged(self, make_config):
+        [connection] = make_config('REMOTE_USER1="vasya"\n').read()
+        assert connection["REMOTE_USER"] == '"vasya"'
+        assert "REMOTE_USER: " in "\n".join(connection.validate())
 
     def test_undecodable_bytes_do_not_crash_read(self, cfg_path):
-        cfg_path.write_bytes(b"REMOTE_USER=caf\xe9\n")
-        value = TunnelConfig(cfg_path).read()["REMOTE_USER"]
-        assert value.startswith("caf")
-        assert "REMOTE_USER" in errors_for(VALID_VALUES | {"REMOTE_USER": value})
+        cfg_path.write_bytes(b"REMOTE_USER1=caf\xe9\n")
+        [connection] = TunnelConfig(cfg_path).read()
+        assert connection["REMOTE_USER"].startswith("caf")
+        assert any(e.startswith("REMOTE_USER:") for e in connection.validate())
 
     @pytest.mark.parametrize(
         "line",
         [
-            pytest.param("remote_user=vasya", id="lowercase-key"),
-            pytest.param("export REMOTE_USER=vasya", id="shell-export"),
-            pytest.param("REMOTE USER=vasya", id="space-in-key"),
+            pytest.param("remote_user1=vasya", id="lowercase-key"),
+            pytest.param("export REMOTE_USER1=vasya", id="shell-export"),
+            pytest.param("REMOTE USER1=vasya", id="space-in-key"),
+            pytest.param("REMOTE_USER01=vasya", id="leading-zero"),
         ],
     )
-    def test_misspelled_key_leaves_schema_key_missing(
-        self, make_config, valid_values, line
-    ):
-        del valid_values["REMOTE_USER"]
-        values = make_config(cfg_text(valid_values) + line + "\n").read()
-        assert "REMOTE_USER" not in values
-        assert_only_invalid(schema_subset(values), "REMOTE_USER")
+    def test_misspelled_key_leaves_field_empty(self, make_config, line):
+        values = dict(VALID_VALUES)
+        del values["REMOTE_USER"]
+        [connection] = make_config(cfg_text(values) + line + "\n").read()
+        assert connection["REMOTE_USER"] == ""
+        [error] = TunnelConfig.validate([connection])
+        assert error.startswith('Connection "home": REMOTE_USER:')
 
 
-class TestMissingKeys:
-    @pytest.mark.parametrize("key", list(VALID_VALUES))
-    def test_missing_key_is_absent_from_read(
-        self, make_config, valid_values, key
-    ):
-        del valid_values[key]
-        values = make_config(cfg_text(valid_values)).read()
-        assert key not in values
-        assert errors_for(values) == {key: f"{key}: missing"}
+class TestMissingKeysAndValues:
+    @pytest.mark.parametrize("key", PORT_KEYS + IDENTIFIER_KEYS)
+    def test_missing_key_is_empty_and_flagged(self, make_config, key):
+        values = dict(VALID_VALUES)
+        del values[key]
+        [connection] = make_config(cfg_text(values)).read()
+        assert connection[key] == ""
+        assert [e.split(":")[0] for e in connection.validate()] == [key]
 
-    def test_empty_file_misses_every_key(self, make_config):
-        values = make_config("").read()
-        assert sorted(errors_for(values)) == sorted(VALID_VALUES)
+    def test_missing_enabled_is_empty_and_allowed(self, make_config):
+        values = dict(VALID_VALUES)
+        del values["ENABLED"]
+        [connection] = make_config(cfg_text(values)).read()
+        assert connection["ENABLED"] == ""
+        assert TunnelConfig.validate([connection]) == []
 
-    @pytest.mark.parametrize("key", list(VALID_VALUES))
-    def test_write_with_missing_key_is_rejected(
-        self, make_config, valid_values, key
-    ):
-        config = make_config(cfg_text(valid_values))
-        del valid_values[key]
-        assert_write_rejected(config, valid_values)
-
-    def test_write_unknown_key_is_rejected(self, cfg_path, valid_values):
-        values = valid_values | {"EXTRA_KEY": "x"}
-        assert list(errors_for(values)) == ["'EXTRA_KEY'"]
-        with pytest.raises(ValidationError):
-            TunnelConfig(cfg_path).write(values)
-        assert not cfg_path.exists()
-
-
-class TestMissingValues:
     @pytest.mark.parametrize("key", PORT_KEYS + IDENTIFIER_KEYS)
     @pytest.mark.parametrize(
         "line_value",
@@ -367,203 +456,83 @@ class TestMissingValues:
             pytest.param(" # comment", id="comment-only"),
         ],
     )
-    def test_empty_value_is_read_as_empty_and_invalid(
-        self, make_config, valid_values, key, line_value
+    def test_empty_value_is_read_as_empty_and_flagged(
+        self, make_config, key, line_value
     ):
-        values = make_config(
-            cfg_text(valid_values | {key: line_value})
+        [connection] = make_config(
+            cfg_text(VALID_VALUES | {key: line_value})
         ).read()
-        assert values[key] == ""
-        assert_only_invalid(values, key)
+        assert connection[key] == ""
+        assert [e.split(":")[0] for e in connection.validate()] == [key]
 
     @pytest.mark.parametrize("key", PORT_KEYS + IDENTIFIER_KEYS)
-    def test_empty_value_is_not_written(self, make_config, valid_values, key):
-        config = make_config(cfg_text(valid_values))
-        assert_write_rejected(config, valid_values | {key: ""})
-
-    def test_enabled_has_no_value_rules(self, valid_values):
-        # Dead key (see config_schema.ENABLED): any storable value is OK.
-        for value in ["", "yes", "0"]:
-            assert TunnelConfig.validate(valid_values | {"ENABLED": value}) == []
+    def test_empty_value_is_not_written(self, make_config, valid, key):
+        config = make_config(cfg_text(VALID_VALUES))
+        assert_write_rejected(
+            config, [valid, Connection(OTHER_VALUES | {key: ""})]
+        )
 
 
 # --------------------------------------------------------------------------
 # Values that could break or inject into the ssh command line
+# (see the ExecStart line in conftest.py)
 # --------------------------------------------------------------------------
-#
-#   ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N
-#       ${REMOTE_USER}@${REMOTE_SERVER}
-#       -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
-#
-# (the current daemon unit still uses the old key names, see doc/config.md)
-
-
-DANGEROUS_IDENTIFIERS = [
-    pytest.param("vasya smith", id="space"),
-    pytest.param("vasya\tx", id="tab"),
-    pytest.param(" vasya", id="leading-space"),
-    pytest.param("$USER", id="dollar-var"),
-    pytest.param("${USER}", id="dollar-brace"),
-    pytest.param("$(reboot)", id="command-subst"),
-    pytest.param("`reboot`", id="backticks"),
-    pytest.param("vasya;reboot", id="semicolon"),
-    pytest.param("vasya&&reboot", id="and"),
-    pytest.param("vasya&", id="background"),
-    pytest.param("vasya|nc", id="pipe"),
-    pytest.param("vasya>/etc/passwd", id="redirect-out"),
-    pytest.param("vasya</etc/shadow", id="redirect-in"),
-    pytest.param("va'sya", id="single-quote-closes-bash-c"),
-    pytest.param('va"sya', id="double-quote"),
-    pytest.param("va\\sya", id="backslash"),
-    pytest.param("vasya*", id="glob-star"),
-    pytest.param("vasy?", id="glob-question"),
-    pytest.param("[ab]", id="glob-class"),
-    pytest.param("{a,b}", id="brace-expansion"),
-    pytest.param("~root", id="tilde"),
-    pytest.param("vasya!", id="history"),
-    pytest.param("(vasya)", id="subshell"),
-    pytest.param("vasya@evil.com", id="at-redirects-host"),
-    pytest.param("evil.com:2222", id="colon"),
-    pytest.param("-oProxyCommand=reboot", id="ssh-option-with-equals"),
-    pytest.param("a/b", id="slash"),
-    pytest.param("a,b", id="comma"),
-    pytest.param("vasya#x", id="hash-comment"),
-    pytest.param("vasya\nREMOTE_PORT=1", id="newline-injects-key"),
-    pytest.param("vasya\r", id="carriage-return"),
-    pytest.param("vasya\x00", id="nul"),
-    pytest.param("v\u0430sya", id="cyrillic-homoglyph"),
-    pytest.param("vasy\u0430.com", id="cyrillic-a-in-host"),
-    pytest.param("", id="empty"),
-]
-
-LEADING_DASH_IDENTIFIERS = [
-    pytest.param("-F.evil", id="ssh-config-option"),
-    pytest.param("-v", id="short-option"),
-    pytest.param("--", id="end-of-options"),
-    pytest.param("-", id="dash-only"),
-    pytest.param("-oProxyCommand", id="ssh-o-option"),
-    pytest.param("--login", id="su-long-option"),
-]
-
-DANGEROUS_PORTS = [
-    pytest.param("22 -oProxyCommand=reboot", id="space-option"),
-    pytest.param("22;reboot", id="semicolon"),
-    pytest.param("$PORT", id="dollar-var"),
-    pytest.param("${PORT}", id="dollar-brace"),
-    pytest.param("$(echo 22)", id="command-subst"),
-    pytest.param("`echo 22`", id="backticks"),
-    pytest.param("22|nc", id="pipe"),
-    pytest.param("22&", id="background"),
-    pytest.param("22'", id="single-quote"),
-    pytest.param("22:localhost:23", id="colon-changes-forward"),
-    pytest.param("22\nLOCAL_PORT=1", id="newline-injects-key"),
-    pytest.param(" 22", id="leading-space"),
-    pytest.param("22 ", id="trailing-space"),
-    pytest.param("2 2", id="inner-space"),
-    pytest.param("+22", id="plus-sign"),
-    pytest.param("-22", id="minus-sign"),
-    pytest.param("22.0", id="decimal"),
-    pytest.param("2_2", id="underscore"),
-    pytest.param("0x16", id="hex"),
-    pytest.param("1e3", id="exponent"),
-    pytest.param("\uff12\uff12", id="fullwidth-digits"),
-    pytest.param("\u0662\u0662", id="arabic-indic-digits"),
-    pytest.param("twenty-two", id="letters"),
-]
 
 
 class TestShellBreakingValues:
     @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize("value", DANGEROUS_IDENTIFIERS)
-    def test_dangerous_identifier_is_invalid(self, valid_values, key, value):
-        assert_only_invalid(valid_values | {key: value}, key)
-
-    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize("value", DANGEROUS_IDENTIFIERS)
+    @pytest.mark.parametrize(
+        "value", DANGEROUS_IDENTIFIERS + LEADING_DASH_IDENTIFIERS
+    )
     def test_dangerous_identifier_is_not_written(
-        self, make_config, valid_values, key, value
+        self, make_config, valid, key, value
     ):
-        config = make_config(cfg_text(valid_values))
-        assert_write_rejected(config, valid_values | {key: value})
-
-    @pytest.mark.parametrize("key", PORT_KEYS)
-    @pytest.mark.parametrize("value", DANGEROUS_PORTS)
-    def test_dangerous_port_is_invalid(self, valid_values, key, value):
-        assert_only_invalid(valid_values | {key: value}, key)
+        config = make_config(cfg_text(VALID_VALUES))
+        bad = Connection(OTHER_VALUES | {key: value})
+        assert_write_rejected(config, [valid, bad])
 
     @pytest.mark.parametrize("key", PORT_KEYS)
     @pytest.mark.parametrize("value", DANGEROUS_PORTS)
     def test_dangerous_port_is_not_written(
-        self, make_config, valid_values, key, value
+        self, make_config, valid, key, value
     ):
-        config = make_config(cfg_text(valid_values))
-        assert_write_rejected(config, valid_values | {key: value})
-
-    @pytest.mark.parametrize(
-        "value",
-        [
-            pytest.param("true\nREMOTE_USER=x", id="newline-injects-key"),
-            pytest.param("true # x", id="hash-comment"),
-            pytest.param("true\r", id="carriage-return"),
-            pytest.param("true\x00", id="nul"),
-            pytest.param(" true", id="leading-space"),
-        ],
-    )
-    def test_enabled_cannot_break_the_file(
-        self, make_config, valid_values, value
-    ):
-        assert_only_invalid(valid_values | {"ENABLED": value}, "ENABLED")
-        assert_write_rejected(
-            make_config(cfg_text(valid_values)), valid_values | {"ENABLED": value}
-        )
+        config = make_config(cfg_text(VALID_VALUES))
+        bad = Connection(OTHER_VALUES | {key: value})
+        assert_write_rejected(config, [valid, bad])
 
     @pytest.mark.parametrize(
         "line, key",
         [
-            ("REMOTE_USER=$(reboot)", "REMOTE_USER"),
-            ("REMOTE_SERVER=vasya.com;reboot", "REMOTE_SERVER"),
-            ("RUN_DAEMON_USER=root' -c 'reboot", "RUN_DAEMON_USER"),
-            ("REMOTE_PORT=22 -oProxyCommand=reboot", "REMOTE_PORT"),
-            ("LOCAL_PORT=`reboot`", "LOCAL_PORT"),
-            ("NAME=home;reboot", "NAME"),
+            ("REMOTE_USER2=$(reboot)", "REMOTE_USER"),
+            ("REMOTE_SERVER2=vasya.com;reboot", "REMOTE_SERVER"),
+            ("RUN_DAEMON_USER2=root' -c 'reboot", "RUN_DAEMON_USER"),
+            ("REMOTE_PORT2=22 -oProxyCommand=reboot", "REMOTE_PORT"),
+            ("LOCAL_PORT2=`reboot`", "LOCAL_PORT"),
+            ("REMOTE_USER2=-F.evil", "REMOTE_USER"),
+            ("NAME2=home;reboot", "NAME"),
         ],
     )
     def test_hand_edited_injection_is_read_verbatim_and_flagged(
-        self, make_config, valid_values, line, key
+        self, make_config, line, key
     ):
         # A hand-edited file is shown as is (no expansion, nothing run) and
         # flagged, so it can't be saved back until fixed.
-        del valid_values[key]
-        values = make_config(cfg_text(valid_values) + line + "\n").read()
-        assert values[key] == line.split("=", 1)[1]
-        assert_only_invalid(values, key)
+        values = dict(OTHER_VALUES)
+        del values[key]
+        config = make_config(
+            cfg_text(VALID_VALUES) + cfg_text(values, start=2) + line + "\n"
+        )
+        connections = config.read()
+        assert connections[1][key] == line.split("=", 1)[1]
+        [error] = TunnelConfig.validate(connections)
+        assert f": {key}:" in error
 
-    def test_rejected_newline_cannot_add_a_line(self, make_config, valid_values):
-        config = make_config(cfg_text(valid_values))
+    def test_rejected_newline_cannot_add_a_line(self, make_config, valid):
+        config = make_config(cfg_text(VALID_VALUES))
+        bad = Connection(VALID_VALUES | {"REMOTE_USER": "x\nREMOTE_PORT1=1"})
         with pytest.raises(ValidationError):
-            config.write(valid_values | {"REMOTE_USER": "x\nREMOTE_PORT=1"})
-        assert config.read()["REMOTE_PORT"] == valid_values["REMOTE_PORT"]
-
-    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize("value", LEADING_DASH_IDENTIFIERS)
-    def test_leading_dash_is_invalid(self, valid_values, key, value):
-        # ssh/su would parse the value as a command-line option.
-        assert_only_invalid(valid_values | {key: value}, key)
-
-    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize("value", LEADING_DASH_IDENTIFIERS)
-    def test_leading_dash_is_not_written(
-        self, make_config, valid_values, key, value
-    ):
-        config = make_config(cfg_text(valid_values))
-        assert_write_rejected(config, valid_values | {key: value})
-
-    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize(
-        "value", ["my-host", "vasya-", "a-b-c", "_svc", ".local", "9-lives"]
-    )
-    def test_dash_after_first_char_is_valid(self, valid_values, key, value):
-        assert TunnelConfig.validate(valid_values | {key: value}) == []
+            config.write([bad])
+        assert config.read() == [valid]
 
 
 # --------------------------------------------------------------------------
@@ -571,42 +540,123 @@ class TestShellBreakingValues:
 # --------------------------------------------------------------------------
 
 
-class TestRewritePreservesFile:
-    def test_other_lines_kept_verbatim(self, make_config, valid_values):
+class TestRewrite:
+    def test_other_lines_kept_at_the_top(self, make_config, valid, other):
         config = make_config(
             "# header comment\n"
-            "\n"
-            "ENABLED=true\n"
-            "REMOTE_USER=old   # inline comment\n"
-            "  # indented comment\n"
             "OTHER_KEY=keep  me   # as is\n"
-            "REMOTE_USER=duplicate\n"
+            "\n"
+            "NAME1=old   # inline comment on a connection key\n"
+            "  # indented comment\n"
             "junk line without equals\n"
+            "LOCAL_PORT1=1\n"
         )
-        config.write(valid_values)
+        config.write([valid, other])
 
         assert config.path.read_text() == (
             "# header comment\n"
-            "\n"
-            "ENABLED=false\n"
-            "REMOTE_USER=vasya\n"
-            "  # indented comment\n"
             "OTHER_KEY=keep  me   # as is\n"
+            "\n"
+            "  # indented comment\n"
             "junk line without equals\n"
-            "NAME=home\n"
-            "RUN_DAEMON_USER=username\n"
-            "REMOTE_SERVER=vasya.com\n"
-            "LOCAL_PORT=22\n"
-            "REMOTE_PORT=5001\n"
+            "\n"
+            + block(1, VALID_VALUES) + "\n" + block(2, OTHER_VALUES)
         )
 
-    def test_old_format_keys_are_kept_as_unknown_keys(
-        self, make_config, valid_values
+    def test_rewrite_is_idempotent(self, make_config, valid, other):
+        config = make_config("# header\nOTHER=1\n")
+        config.write([valid, other])
+        first = config.path.read_text()
+        config.write([valid, other])
+        config.write([valid, other])
+        assert config.path.read_text() == first  # no blank-line pile-up
+
+    def test_deleting_a_connection_renumbers_the_rest(self, make_config):
+        third = Connection(VALID_VALUES | {"NAME": "lab", "REMOTE_PORT": "5003"})
+        config = make_config("")
+        first, second = Connection(VALID_VALUES), Connection(OTHER_VALUES)
+        config.write([first, second, third])
+
+        connections = config.read()
+        del connections[1]
+        config.write(connections)
+
+        text = config.path.read_text()
+        assert text == (
+            block(1, VALID_VALUES) + "\n"
+            + block(2, VALID_VALUES | {"NAME": "lab", "REMOTE_PORT": "5003"})
+        )
+        assert "3=" not in text
+        assert config.read() == [first, third]
+
+    def test_deleting_all_connections_keeps_other_lines(
+        self, make_config, valid
     ):
-        # Config written for the old schema (before NAME / LOCAL_PORT /
-        # REMOTE_PORT): its port keys are now unknown, so they are kept
-        # verbatim, and the new keys are reported missing until saved.
-        old_format = (
+        config = make_config("# header\nOTHER=1\n\n" + block(1, VALID_VALUES))
+        config.write([])
+        assert config.path.read_text() == "# header\nOTHER=1\n"
+        assert config.read() == []
+
+    def test_gaps_close_up_on_write(self, make_config, valid, other):
+        config = make_config(
+            cfg_text(VALID_VALUES, start=3) + cfg_text(OTHER_VALUES, start=9)
+        )
+        config.write(config.read())
+        assert config.path.read_text() == (
+            block(1, VALID_VALUES) + "\n" + block(2, OTHER_VALUES)
+        )
+
+    def test_delimiter_follows_renamed_connection(self, make_config, valid):
+        config = make_config("")
+        config.write([valid])
+        config.write([Connection(VALID_VALUES | {"NAME": "renamed"})])
+        text = config.path.read_text()
+        assert "# ===== Connection 1: renamed =====\n" in text
+        assert "home" not in text
+
+    def test_old_delimiters_are_not_duplicated(self, make_config, valid):
+        config = make_config(
+            "# ===== Connection 1: old name =====\n"
+            "#=== Connection 7 whatever ===\n"
+        )
+        config.write([valid])
+        assert config.path.read_text() == block(1, VALID_VALUES)
+
+    def test_undecodable_bytes_in_other_lines_survive(self, cfg_path, valid):
+        cfg_path.write_bytes(b"OTHER=caf\xe9\xff\n" + cfg_text(VALID_VALUES).encode())
+        TunnelConfig(cfg_path).write([valid])
+        assert cfg_path.read_bytes().startswith(b"OTHER=caf\xe9\xff\n")
+
+    def test_crlf_file_is_rewritten_with_lf(self, cfg_path, valid):
+        cfg_path.write_bytes(cfg_text(VALID_VALUES).replace("\n", "\r\n").encode())
+        TunnelConfig(cfg_path).write([valid])
+        assert b"\r" not in cfg_path.read_bytes()
+        assert TunnelConfig(cfg_path).read() == [valid]
+
+    def test_utf8_bom_file_is_rewritten_without_duplicates(
+        self, cfg_path, valid
+    ):
+        cfg_path.write_bytes(b"\xef\xbb\xbf" + cfg_text(VALID_VALUES).encode())
+        TunnelConfig(cfg_path).write([valid])
+        assert cfg_path.read_text() == block(1, VALID_VALUES)
+
+    def test_single_connection_format_keys_are_kept_as_other_keys(
+        self, make_config, valid
+    ):
+        # Un-numbered keys of the previous one-connection format are not
+        # connections; they stay in the file verbatim.
+        legacy = "NAME=home\nENABLED=false\nREMOTE_USER=vasya\n"
+        config = make_config(legacy)
+        assert config.read() == []
+        config.write([valid])
+        assert config.path.read_text() == legacy + "\n" + block(1, VALID_VALUES)
+
+    def test_original_daemon_format_ports_become_connection_1(
+        self, make_config
+    ):
+        # The original daemon config used LOCAL_PORT1 / REMOTE_PORT1, which
+        # now read as fields of connection 1; the rest is un-numbered.
+        config = make_config(
             "ENABLED=false\n"
             "RUN_DAEMON_USER=username\n"
             "REMOTE_USER=vasya\n"
@@ -615,32 +665,6 @@ class TestRewritePreservesFile:
             "LOCAL_PORT1=22\n"
             "REMOTE_PORT1=5001\n"
         )
-        config = make_config(old_format)
-        missing = errors_for(schema_subset(config.read()))
-        assert sorted(missing) == ["LOCAL_PORT", "NAME", "REMOTE_PORT"]
-
-        config.write(valid_values)
-
-        assert config.path.read_text() == old_format + (
-            "NAME=home\nLOCAL_PORT=22\nREMOTE_PORT=5001\n"
-        )
-
-    def test_undecodable_bytes_in_other_lines_survive(
-        self, cfg_path, valid_values
-    ):
-        cfg_path.write_bytes(b"OTHER=caf\xe9\xff\n" + cfg_text(valid_values).encode())
-        TunnelConfig(cfg_path).write(valid_values)
-        assert cfg_path.read_bytes().startswith(b"OTHER=caf\xe9\xff\n")
-
-    def test_crlf_file_is_rewritten_with_lf(self, cfg_path, valid_values):
-        cfg_path.write_bytes(cfg_text(valid_values).replace("\n", "\r\n").encode())
-        TunnelConfig(cfg_path).write(valid_values)
-        assert b"\r" not in cfg_path.read_bytes()
-        assert TunnelConfig(cfg_path).read() == valid_values
-
-    def test_utf8_bom_file_is_rewritten_without_duplicates(
-        self, cfg_path, valid_values
-    ):
-        cfg_path.write_bytes(b"\xef\xbb\xbf" + cfg_text(valid_values).encode())
-        TunnelConfig(cfg_path).write(valid_values | {"ENABLED": "true"})
-        assert cfg_path.read_text() == cfg_text(valid_values | {"ENABLED": "true"})
+        assert config.read() == [
+            Connection({"LOCAL_PORT": "22", "REMOTE_PORT": "5001"})
+        ]
