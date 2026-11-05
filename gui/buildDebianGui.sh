@@ -5,7 +5,7 @@ PROJ_NAME=vt-tunnel-gui
 MODULE_NAME=vt_tunnel_gui
 BUILD_DIR=build
 ARCH=all
-VERSION=0.1.0
+VERSION=0.1.1
 CONTROL=control
 CHANGELOG=changelog
 COPYRIGHT=copyright
@@ -49,9 +49,11 @@ sys.exit(main())
 EOF
 chmod 755 $PACKAGE_DIR/usr/bin/$PROJ_NAME
 
-# Python module
-cp $ROOT_DIR/$MODULE_SRC_DIR/*.py $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME/
-chmod 644 $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME/*.py
+# Python module: recursive copy so subpackages (views/, models/) ship too;
+# bytecode caches are dev leftovers and must not land in the package
+cp -r $ROOT_DIR/$MODULE_SRC_DIR/. $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME/
+find $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME -type d -name __pycache__ -exec rm -rf {} +
+find $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME -type f -name '*.py' -exec chmod 644 {} +
 
 # Desktop entry and polkit policy
 cp $ROOT_DIR/$DESKTOP_SRC_DIR/$DESKTOP_FILE $PACKAGE_DIR/$DESKTOP_INSTALL_DIR
