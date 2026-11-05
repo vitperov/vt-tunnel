@@ -23,17 +23,18 @@ Format (systemd `EnvironmentFile=`):
 
 ## Keys
 
-The current daemon supports exactly one tunnel pair:
+The file describes one connection (one tunnel pair); support for
+multiple connections is being prepared:
 
 | key | example | meaning |
 |---|---|---|
+| `NAME` | `home` | connection name, shown in the GUI's connection list |
 | `ENABLED` | `false` | **dead** — nothing consumes it; kept only for conffile-upgrade compatibility. Enable/disable via `systemctl enable/disable --now vt-tunnel` instead |
 | `RUN_DAEMON_USER` | `username` | local user the tunnel runs as |
 | `REMOTE_USER` | `vasya` | SSH user on the remote server |
 | `REMOTE_SERVER` | `vasya.com` | server with the external IP and domain name |
-| `REMOTE_SSH_PORT` | `22` | SSH port on the remote server |
-| `LOCAL_PORT1` | `22` | local port to expose |
-| `REMOTE_PORT1` | `5001` | port bound on the remote server, forwarding back to `LOCAL_PORT1` |
+| `LOCAL_PORT` | `22` | local port to expose |
+| `REMOTE_PORT` | `5001` | port bound on the remote server, forwarding back to `LOCAL_PORT` |
 
 The machine-readable counterpart of this table is
 `src/vt_tunnel_gui/config_schema.py` — authoritative for the validation
@@ -46,16 +47,23 @@ preserved verbatim when the file is rewritten; comments need not be.
 
     ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
 
+> **Pending daemon update:** this is the current `vt-tunnel.service`. It
+> still reads the old keys `REMOTE_SSH_PORT`, `LOCAL_PORT1` and
+> `REMOTE_PORT1`, which the schema replaced with `LOCAL_PORT` and
+> `REMOTE_PORT` (`REMOTE_SSH_PORT` was dropped: ssh uses its default port
+> or `~/.ssh/config`). The unit has to be updated to the new keys.
+
 Because config values flow verbatim into that shell line, a hand-edited
 cfg can inject shell commands. Any code that writes this file (GUI or
 helper) must validate strictly before writing:
 
-- `REMOTE_SSH_PORT`, `LOCAL_PORT1`, `REMOTE_PORT1`: integer, `1`–`65535`
-- `REMOTE_USER`, `RUN_DAEMON_USER`, `REMOTE_SERVER`: conservative charset —
-  letters, digits, `.`, `-`, `_`; no whitespace, quotes, `$`, `;`, `|`, `&`,
-  backticks or other shell metacharacters; must not start with `-`, or
-  `ssh`/`su` would take the value for a command-line option (e.g.
-  `REMOTE_USER=-F.evil`)
+- `LOCAL_PORT`, `REMOTE_PORT`: integer, `1`–`65535`
+- `NAME`, `REMOTE_USER`, `RUN_DAEMON_USER`, `REMOTE_SERVER`: conservative
+  charset — letters, digits, `.`, `-`, `_`; no whitespace, quotes, `$`,
+  `;`, `|`, `&`, backticks or other shell metacharacters; must not start
+  with `-`, or `ssh`/`su` would take the value for a command-line option
+  (e.g. `REMOTE_USER=-F.evil`). `NAME` is not used by the daemon yet; it
+  follows the same rule so it stays safe to use in commands or unit names.
 
 ## Applying changes
 

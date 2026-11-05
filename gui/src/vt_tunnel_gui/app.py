@@ -8,6 +8,7 @@ from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.controller import Controller
 from vt_tunnel_gui.models.model import Model
 from vt_tunnel_gui.models.tunnel_config import TunnelConfig
+from vt_tunnel_gui.views.connection_view import ConnectionView
 from vt_tunnel_gui.views.view import MainWindow
 
 
@@ -42,7 +43,8 @@ def main() -> int:
     config_path = args.config.absolute()
 
     model = Model(TunnelConfig(config_path))
-    view = MainWindow()
-    controller = Controller(model, view)
+    main_view = MainWindow()
+    connection_view = ConnectionView(main_view)
+    controller = Controller(model, main_view, connection_view)
     controller.show()
     return app.exec()

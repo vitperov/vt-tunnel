@@ -157,13 +157,13 @@ class TestExistingAndMissingFile:
 
 DOC_EXAMPLE = """\
 # vt-tunnel configuration
+NAME=home
 ENABLED=false
 RUN_DAEMON_USER=username
 REMOTE_USER=vasya
 REMOTE_SERVER=vasya.com
-REMOTE_SSH_PORT=22
-LOCAL_PORT1=22
-REMOTE_PORT1=5001
+LOCAL_PORT=22
+REMOTE_PORT=5001
 """
 
 
@@ -197,13 +197,13 @@ class TestExpectedValues:
         config = make_config(
             "  # indented comment\n"
             "\n"
+            "NAME=home\n"
             "ENABLED = false\n"
             "RUN_DAEMON_USER=username   # trailing comment\n"
             "\tREMOTE_USER=vasya\t\n"
             "REMOTE_SERVER=vasya.com\n"
-            "REMOTE_SSH_PORT=22#no space before comment\n"
-            "LOCAL_PORT1=22\n"
-            "REMOTE_PORT1=5001\n"
+            "LOCAL_PORT=22#no space before comment\n"
+            "REMOTE_PORT=5001\n"
         )
         assert config.read() == VALID_VALUES
 
@@ -262,14 +262,13 @@ class TestOutOfRangeValues:
         assert_write_rejected(config, valid_values | {key: port})
 
     def test_error_message_names_the_allowed_range(self, valid_values):
-        message = errors_for(valid_values | {"LOCAL_PORT1": "0"})["LOCAL_PORT1"]
+        message = errors_for(valid_values | {"LOCAL_PORT": "0"})["LOCAL_PORT"]
         assert "1" in message and "65535" in message
 
     def test_all_errors_are_reported_at_once(self, valid_values):
         values = valid_values | {
-            "REMOTE_SSH_PORT": "0",
-            "LOCAL_PORT1": "65536",
-            "REMOTE_PORT1": "-5",
+            "LOCAL_PORT": "65536",
+            "REMOTE_PORT": "-5",
         }
         assert sorted(errors_for(values)) == sorted(PORT_KEYS)
 
@@ -393,8 +392,10 @@ class TestMissingValues:
 # --------------------------------------------------------------------------
 #
 #   ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N
-#       -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER}
-#       -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
+#       ${REMOTE_USER}@${REMOTE_SERVER}
+#       -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
+#
+# (the current daemon unit still uses the old key names, see doc/config.md)
 
 
 DANGEROUS_IDENTIFIERS = [
@@ -427,7 +428,7 @@ DANGEROUS_IDENTIFIERS = [
     pytest.param("a/b", id="slash"),
     pytest.param("a,b", id="comma"),
     pytest.param("vasya#x", id="hash-comment"),
-    pytest.param("vasya\nREMOTE_PORT1=1", id="newline-injects-key"),
+    pytest.param("vasya\nREMOTE_PORT=1", id="newline-injects-key"),
     pytest.param("vasya\r", id="carriage-return"),
     pytest.param("vasya\x00", id="nul"),
     pytest.param("v\u0430sya", id="cyrillic-homoglyph"),
@@ -455,7 +456,7 @@ DANGEROUS_PORTS = [
     pytest.param("22&", id="background"),
     pytest.param("22'", id="single-quote"),
     pytest.param("22:localhost:23", id="colon-changes-forward"),
-    pytest.param("22\nLOCAL_PORT1=1", id="newline-injects-key"),
+    pytest.param("22\nLOCAL_PORT=1", id="newline-injects-key"),
     pytest.param(" 22", id="leading-space"),
     pytest.param("22 ", id="trailing-space"),
     pytest.param("2 2", id="inner-space"),
@@ -522,8 +523,9 @@ class TestShellBreakingValues:
             ("REMOTE_USER=$(reboot)", "REMOTE_USER"),
             ("REMOTE_SERVER=vasya.com;reboot", "REMOTE_SERVER"),
             ("RUN_DAEMON_USER=root' -c 'reboot", "RUN_DAEMON_USER"),
-            ("REMOTE_SSH_PORT=22 -oProxyCommand=reboot", "REMOTE_SSH_PORT"),
-            ("LOCAL_PORT1=`reboot`", "LOCAL_PORT1"),
+            ("REMOTE_PORT=22 -oProxyCommand=reboot", "REMOTE_PORT"),
+            ("LOCAL_PORT=`reboot`", "LOCAL_PORT"),
+            ("NAME=home;reboot", "NAME"),
         ],
     )
     def test_hand_edited_injection_is_read_verbatim_and_flagged(
@@ -539,8 +541,8 @@ class TestShellBreakingValues:
     def test_rejected_newline_cannot_add_a_line(self, make_config, valid_values):
         config = make_config(cfg_text(valid_values))
         with pytest.raises(ValidationError):
-            config.write(valid_values | {"REMOTE_USER": "x\nREMOTE_PORT1=1"})
-        assert config.read()["REMOTE_PORT1"] == valid_values["REMOTE_PORT1"]
+            config.write(valid_values | {"REMOTE_USER": "x\nREMOTE_PORT=1"})
+        assert config.read()["REMOTE_PORT"] == valid_values["REMOTE_PORT"]
 
     @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
     @pytest.mark.parametrize("value", LEADING_DASH_IDENTIFIERS)
@@ -591,11 +593,36 @@ class TestRewritePreservesFile:
             "  # indented comment\n"
             "OTHER_KEY=keep  me   # as is\n"
             "junk line without equals\n"
+            "NAME=home\n"
             "RUN_DAEMON_USER=username\n"
+            "REMOTE_SERVER=vasya.com\n"
+            "LOCAL_PORT=22\n"
+            "REMOTE_PORT=5001\n"
+        )
+
+    def test_old_format_keys_are_kept_as_unknown_keys(
+        self, make_config, valid_values
+    ):
+        # Config written for the old schema (before NAME / LOCAL_PORT /
+        # REMOTE_PORT): its port keys are now unknown, so they are kept
+        # verbatim, and the new keys are reported missing until saved.
+        old_format = (
+            "ENABLED=false\n"
+            "RUN_DAEMON_USER=username\n"
+            "REMOTE_USER=vasya\n"
             "REMOTE_SERVER=vasya.com\n"
             "REMOTE_SSH_PORT=22\n"
             "LOCAL_PORT1=22\n"
             "REMOTE_PORT1=5001\n"
+        )
+        config = make_config(old_format)
+        missing = errors_for(schema_subset(config.read()))
+        assert sorted(missing) == ["LOCAL_PORT", "NAME", "REMOTE_PORT"]
+
+        config.write(valid_values)
+
+        assert config.path.read_text() == old_format + (
+            "NAME=home\nLOCAL_PORT=22\nREMOTE_PORT=5001\n"
         )
 
     def test_undecodable_bytes_in_other_lines_survive(
