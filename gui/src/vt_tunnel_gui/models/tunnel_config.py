@@ -55,8 +55,8 @@ def _field_error(field: CfgField, value: str) -> str | None:
     elif field.type is FieldType.IDENTIFIER:
         if not _IDENTIFIER_RE.fullmatch(value):
             return (
-                f"{field.key}: must be non-empty and contain only "
-                "letters, digits, '.', '-' and '_'"
+                f"{field.key}: must be non-empty, contain only "
+                "letters, digits, '.', '-' and '_', and not start with '-'"
             )
     elif value != value.strip() or any(c in value for c in _UNSTORABLE_CHARS):
         # No schema rule (e.g. the dead ENABLED key): only make sure the

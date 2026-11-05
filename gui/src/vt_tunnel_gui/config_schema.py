@@ -15,7 +15,9 @@ DEFAULT_CONFIG_PATH = "/etc/systemd/system/vt-tunnel.cfg"
 PORT_MIN = 1
 PORT_MAX = 65535
 
-IDENTIFIER_PATTERN = r"[A-Za-z0-9._-]+"
+# Conservative charset; must not start with "-", or ssh/su would take the
+# value for a command-line option (e.g. REMOTE_USER=-oProxyCommand...).
+IDENTIFIER_PATTERN = r"[A-Za-z0-9._][A-Za-z0-9._-]*"
 
 
 class FieldType(Enum):

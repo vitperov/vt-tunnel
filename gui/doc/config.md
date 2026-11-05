@@ -53,7 +53,9 @@ helper) must validate strictly before writing:
 - `REMOTE_SSH_PORT`, `LOCAL_PORT1`, `REMOTE_PORT1`: integer, `1`–`65535`
 - `REMOTE_USER`, `RUN_DAEMON_USER`, `REMOTE_SERVER`: conservative charset —
   letters, digits, `.`, `-`, `_`; no whitespace, quotes, `$`, `;`, `|`, `&`,
-  backticks or other shell metacharacters
+  backticks or other shell metacharacters; must not start with `-`, or
+  `ssh`/`su` would take the value for a command-line option (e.g.
+  `REMOTE_USER=-F.evil`)
 
 ## Applying changes
 

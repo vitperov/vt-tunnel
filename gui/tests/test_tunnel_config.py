@@ -435,6 +435,15 @@ DANGEROUS_IDENTIFIERS = [
     pytest.param("", id="empty"),
 ]
 
+LEADING_DASH_IDENTIFIERS = [
+    pytest.param("-F.evil", id="ssh-config-option"),
+    pytest.param("-v", id="short-option"),
+    pytest.param("--", id="end-of-options"),
+    pytest.param("-", id="dash-only"),
+    pytest.param("-oProxyCommand", id="ssh-o-option"),
+    pytest.param("--login", id="su-long-option"),
+]
+
 DANGEROUS_PORTS = [
     pytest.param("22 -oProxyCommand=reboot", id="space-option"),
     pytest.param("22;reboot", id="semicolon"),
@@ -533,15 +542,26 @@ class TestShellBreakingValues:
             config.write(valid_values | {"REMOTE_USER": "x\nREMOTE_PORT1=1"})
         assert config.read()["REMOTE_PORT1"] == valid_values["REMOTE_PORT1"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="IDENTIFIER_PATTERN allows a leading '-': ssh/su would parse "
-        "the value as an option. Pending a schema decision.",
-    )
     @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
-    @pytest.mark.parametrize("value", ["-F.evil", "-v", "--"])
+    @pytest.mark.parametrize("value", LEADING_DASH_IDENTIFIERS)
     def test_leading_dash_is_invalid(self, valid_values, key, value):
+        # ssh/su would parse the value as a command-line option.
         assert_only_invalid(valid_values | {key: value}, key)
+
+    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
+    @pytest.mark.parametrize("value", LEADING_DASH_IDENTIFIERS)
+    def test_leading_dash_is_not_written(
+        self, make_config, valid_values, key, value
+    ):
+        config = make_config(cfg_text(valid_values))
+        assert_write_rejected(config, valid_values | {key: value})
+
+    @pytest.mark.parametrize("key", IDENTIFIER_KEYS)
+    @pytest.mark.parametrize(
+        "value", ["my-host", "vasya-", "a-b-c", "_svc", ".local", "9-lives"]
+    )
+    def test_dash_after_first_char_is_valid(self, valid_values, key, value):
+        assert TunnelConfig.validate(valid_values | {key: value}) == []
 
 
 # --------------------------------------------------------------------------
