@@ -1,24 +1,26 @@
-"""Config model for vt-tunnel-gui."""
+"""Config model for vt-tunnel-gui: loads, validates and saves the config."""
 
 import logging
 from pathlib import Path
 
 from vt_tunnel_gui import config_schema
-from vt_tunnel_gui.models.tunnel_config import TunnelConfig
+from vt_tunnel_gui.models.tunnel_config import TunnelConfig, ValidationError
+
+__all__ = ["Model", "ValidationError"]
 
 log = logging.getLogger(__name__)
 
 
 class Model:
-    """Holds the config values of a ``TunnelConfig`` file."""
+    """Holds the config values of one :class:`TunnelConfig` file."""
 
     def __init__(self, config: TunnelConfig) -> None:
-        self.config = config
+        self._config = config
         self._values = self._empty_values()
 
     @property
     def config_path(self) -> Path:
-        return self.config.path
+        return self._config.path
 
     @staticmethod
     def _empty_values() -> dict[str, str]:
@@ -33,7 +35,7 @@ class Model:
         """
         values = self._empty_values()
         try:
-            parsed = self.config.read()
+            parsed = self._config.read()
         except FileNotFoundError:
             log.warning("Config file not found: %s", self.config_path)
         except OSError as err:
@@ -49,17 +51,21 @@ class Model:
         return dict(self._values)
 
     def config_exists(self) -> bool:
-        return self.config.exists()
+        return self._config.exists()
 
-    def validate(self, values: dict[str, str]) -> dict[str, str]:
-        """Return ``{key: error}`` for invalid values (empty if all valid)."""
-        return self.config.validate(values)
+    @staticmethod
+    def validate(values: dict[str, str]) -> list[str]:
+        """Return one error message per invalid value (empty if OK)."""
+        return TunnelConfig.validate(values)
 
-    def save(self, values: dict[str, str], *, create: bool = False) -> None:
-        """Write ``values`` to the config file.
+    def save(self, values: dict[str, str]) -> None:
+        """Write the schema keys of ``values`` to the config file.
 
-        Raises ``ConfigValidationError``, ``FileNotFoundError`` (file absent
-        and ``create`` is false) or ``OSError``; see ``TunnelConfig.write``.
+        Raises :class:`ValidationError` (nothing is written) or ``OSError``.
         """
-        self.config.write(values, create=create)
-        self._values = dict(values)
+        schema_values = {
+            field.key: values.get(field.key, "")
+            for field in config_schema.FIELDS
+        }
+        self._config.write(schema_values)
+        self._values = schema_values

@@ -1,9 +1,11 @@
 """Main window: a form with one input per config key plus Update/Reset.
 
-The view is passive: it knows how to show and collect values and how to
-show dialogs, but does not validate values or decide what the buttons do
-— it only emits signals that the controller handles.
+The view is passive: it knows how to show and collect values, but does
+not validate them or decide what the buttons do — it only emits signals
+that the controller handles.
 """
+
+from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -23,6 +25,8 @@ from vt_tunnel_gui.config_schema import CfgField
 # Values of the boolean ENABLED key as written in the cfg file.
 BOOL_TRUE = "true"
 BOOL_FALSE = "false"
+
+STATUS_TIMEOUT_MS = 5000
 
 
 class MainWindow(QMainWindow):
@@ -94,29 +98,19 @@ class MainWindow(QMainWindow):
         for key, line_edit in self._line_edits.items():
             line_edit.setText(values.get(key, ""))
 
-    def confirm_create(self, path: str) -> bool:
+    def confirm_create(self, path: Path) -> bool:
         """Ask whether to create the missing config file ``path``."""
-        box = QMessageBox(
-            QMessageBox.Icon.Question,
+        answer = QMessageBox.question(
+            self,
             "Create config file?",
-            f"The config file does not exist:\n{path}\n\nCreate it?",
-            parent=self,
+            f"The config file {path} does not exist.\n\nCreate it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        create = box.addButton("Create", QMessageBox.ButtonRole.AcceptRole)
-        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(cancel)
-        box.exec()
-        return box.clickedButton() is create
+        return answer == QMessageBox.StandardButton.Yes
 
-    def show_validation_errors(self, errors: dict[str, str]) -> None:
-        """Tell the user which values are invalid; nothing was saved."""
-        lines = "\n".join(f"{key}: {msg}" for key, msg in errors.items())
-        QMessageBox.warning(
-            self, "Invalid values", f"Not saved, fix these values:\n\n{lines}"
-        )
+    def show_error(self, title: str, text: str) -> None:
+        QMessageBox.critical(self, title, text)
 
-    def show_error(self, title: str, message: str) -> None:
-        QMessageBox.critical(self, title, message)
-
-    def show_status(self, message: str) -> None:
-        self.statusBar().showMessage(message)
+    def show_status(self, text: str) -> None:
+        self.statusBar().showMessage(text, STATUS_TIMEOUT_MS)
