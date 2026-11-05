@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QApplication
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.controller import Controller
 from vt_tunnel_gui.models.model import Model
+from vt_tunnel_gui.models.tunnel_config import TunnelConfig
 from vt_tunnel_gui.views.view import MainWindow
 
 
@@ -40,7 +41,7 @@ def main() -> int:
     # Resolve a relative path once, against the startup working directory.
     config_path = args.config.absolute()
 
-    model = Model(config_path)
+    model = Model(TunnelConfig(config_path))
     view = MainWindow()
     controller = Controller(model, view)
     controller.show()

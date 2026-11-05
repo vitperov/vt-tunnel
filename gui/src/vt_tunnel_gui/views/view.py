@@ -1,8 +1,8 @@
 """Main window: a form with one input per config key plus Update/Reset.
 
-The view is passive: it knows how to show and collect values, but does
-not validate them or decide what the buttons do — it only emits signals
-that the controller handles.
+The view is passive: it knows how to show and collect values and how to
+show dialogs, but does not validate values or decide what the buttons do
+— it only emits signals that the controller handles.
 """
 
 from PyQt6.QtCore import pyqtSignal
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -92,3 +93,30 @@ class MainWindow(QMainWindow):
             checkbox.setChecked(value.strip().lower() == BOOL_TRUE)
         for key, line_edit in self._line_edits.items():
             line_edit.setText(values.get(key, ""))
+
+    def confirm_create(self, path: str) -> bool:
+        """Ask whether to create the missing config file ``path``."""
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            "Create config file?",
+            f"The config file does not exist:\n{path}\n\nCreate it?",
+            parent=self,
+        )
+        create = box.addButton("Create", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is create
+
+    def show_validation_errors(self, errors: dict[str, str]) -> None:
+        """Tell the user which values are invalid; nothing was saved."""
+        lines = "\n".join(f"{key}: {msg}" for key, msg in errors.items())
+        QMessageBox.warning(
+            self, "Invalid values", f"Not saved, fix these values:\n\n{lines}"
+        )
+
+    def show_error(self, title: str, message: str) -> None:
+        QMessageBox.critical(self, title, message)
+
+    def show_status(self, message: str) -> None:
+        self.statusBar().showMessage(message)
