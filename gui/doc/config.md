@@ -35,6 +35,11 @@ The current daemon supports exactly one tunnel pair:
 | `LOCAL_PORT1` | `22` | local port to expose |
 | `REMOTE_PORT1` | `5001` | port bound on the remote server, forwarding back to `LOCAL_PORT1` |
 
+The machine-readable counterpart of this table is
+`src/vt_tunnel_gui/config_schema.py` — authoritative for the validation
+rules (types, ranges, allowed charset). Keys not listed there must be
+preserved verbatim when the file is rewritten; comments need not be.
+
 ## Validation constraints
 
 `vt-tunnel.service` interpolates the values into a `bash -c` string:
