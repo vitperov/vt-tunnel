@@ -182,7 +182,7 @@ class Controller:
             f"Checking connection (up to {ssh_check.CHECK_TIMEOUT_S} s)...",
         )
         try:
-            result = ssh_check.run_check(
+            result = ssh_check.check(
                 connection[config_schema.REMOTE_USER.key],
                 connection[config_schema.REMOTE_SERVER.key],
             )

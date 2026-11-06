@@ -6,6 +6,9 @@ needed) and the service's recent output with ``journalctl``. Reading the
 system journal needs membership in the ``adm`` or ``systemd-journal``
 group; without it journalctl's own message about that is shown instead.
 
+Results come with suggestions: the ``sudo systemctl`` command to enable
+or start the service, and on failure how to test the SSH login.
+
 "Working" means what systemd knows: the service's process is running.
 The service runs autossh, which keeps running while it retries a failing
 ssh, so the recent log is shown in that case too.
@@ -20,6 +23,8 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+
+from vt_tunnel_gui.models.advice import Suggestion
 
 SERVICE = "vt-tunnel.service"
 
@@ -68,6 +73,7 @@ class DaemonResult:
     message: str  # summary for the user
     log: str  # recent service output, verbatim (may be empty)
     command: str  # to look at it yourself in a terminal
+    suggestions: tuple[Suggestion, ...] = ()
 
 
 def service_for(number: int) -> str:
@@ -89,11 +95,41 @@ def coverage_note(number: int) -> str | None:
     )
 
 
+# Advice on failure: the usual cause is the SSH login.
+CHECK_SSH_ADVICE = (
+    "The tunnel logs in to the server with an SSH key, without a "
+    "password; a failing login is a common cause. To test it, click "
+    "\u201cEdit\u201d on the connection, then \u201cCheck connection\u201d."
+)
+
+
+def _systemctl(verb: str, service: str) -> str:
+    return shlex.join(["sudo", SYSTEMCTL, verb, service])
+
+
+def enable_suggestion(service: str) -> Suggestion:
+    return Suggestion(
+        "Enable it, so that it starts at boot:",
+        _systemctl("enable", service),
+    )
+
+
+def start_suggestion(service: str) -> Suggestion:
+    return Suggestion("Start it now:", _systemctl("start", service))
+
+
 def run_check(service: str, timeout: float = TIMEOUT_S) -> DaemonResult:
     command = shlex.join([SYSTEMCTL, "status", service])
 
-    def result(status: Status, message: str, log: str = "") -> DaemonResult:
-        return DaemonResult(status, service, message, log, command)
+    def result(
+        status: Status,
+        message: str,
+        log: str = "",
+        suggestions: tuple[Suggestion, ...] = (),
+    ) -> DaemonResult:
+        return DaemonResult(
+            status, service, message, log, command, suggestions
+        )
 
     shown = _run(
         [SYSTEMCTL, "show", service, "--property=" + ",".join(PROPERTIES)],
@@ -126,13 +162,25 @@ def run_check(service: str, timeout: float = TIMEOUT_S) -> DaemonResult:
         f"It is not enabled ({file_state or 'unknown'}), so it won't "
         "start at boot."
     )
+    enable = enable_suggestion(service)
+    start = start_suggestion(service)
+    check_ssh = Suggestion(CHECK_SSH_ADVICE)
+    # Offered only where it applies: the service isn't enabled.
+    maybe_enable = () if enabled else (enable,)
 
     if load in MASKED_STATES or file_state in MASKED_STATES:
         return result(
             Status.NOT_ENABLED,
-            f"{service} is masked: it can't be started until it is "
-            f"unmasked (sudo systemctl unmask {service}).",
+            f"{service} is masked: it can't be started or enabled until "
+            "it is unmasked.",
             log,
+            (
+                Suggestion(
+                    "Unmask it first:", _systemctl("unmask", service)
+                ),
+                enable,
+                start,
+            ),
         )
     if load != "loaded":
         detail = props.get("LoadError", "")
@@ -141,6 +189,11 @@ def run_check(service: str, timeout: float = TIMEOUT_S) -> DaemonResult:
             f"systemd can't load {service} ({load or 'unknown state'})"
             + (f": {detail}" if detail else "."),
             log,
+            (Suggestion(
+                "Its unit file is broken: reinstall the vt-tunnel package "
+                "(or fix the file), then make systemd read it again:",
+                shlex.join(["sudo", SYSTEMCTL, "daemon-reload"]),
+            ),),
         )
     if active == "active":
         since = props.get("ActiveEnterTimestamp", "")
@@ -148,19 +201,31 @@ def run_check(service: str, timeout: float = TIMEOUT_S) -> DaemonResult:
                                              else ".")
         if not enabled:
             message += " " + not_enabled_hint
-        return result(Status.WORKING, message, log)
+        return result(Status.WORKING, message, log, maybe_enable)
     if active == "failed":
         message = f"{service} failed ({_failure(props)})."
         if not enabled:
             message += " " + not_enabled_hint
-        return result(Status.FAILED, message, log)
+        return result(
+            Status.FAILED,
+            message,
+            log,
+            (
+                check_ssh,
+                Suggestion(
+                    "Once the cause is fixed, start it again:",
+                    _systemctl("restart", service),
+                ),
+                *maybe_enable,
+            ),
+        )
     if not enabled:
         return result(
             Status.NOT_ENABLED,
-            f"{service} is installed but not enabled "
-            f"({file_state or 'unknown'}) and not running. Enable and "
-            f"start it: sudo systemctl enable --now {service}",
+            f"{service} is installed, but not enabled "
+            f"({file_state or 'unknown'}) and not running.",
             log,
+            (enable, start),
         )
     if sub == "auto-restart":
         restarts = props.get("NRestarts", "")
@@ -169,11 +234,13 @@ def run_check(service: str, timeout: float = TIMEOUT_S) -> DaemonResult:
             f"{service} keeps stopping: systemd will restart it soon "
             f"(restarts so far: {restarts or 'unknown'}).",
             log,
+            (check_ssh,),  # systemd retries by itself: nothing to start
         )
     return result(
         Status.FAILED,
         f"{service} is enabled but not running ({active}/{sub}).",
         log,
+        (start,),
     )
 
 

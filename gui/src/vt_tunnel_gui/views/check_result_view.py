@@ -22,7 +22,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from collections.abc import Sequence
+
 from vt_tunnel_gui.models import daemon_check
+from vt_tunnel_gui.models.advice import Suggestion
 from vt_tunnel_gui.models.daemon_check import DaemonResult, Status
 from vt_tunnel_gui.models.ssh_check import CheckResult, Outcome
 
@@ -30,6 +33,7 @@ MIN_WIDTH = 480
 MAX_WIDTH = 900  # wider commands scroll in their field
 ICON_SIZE = 32
 OUTPUT_MAX_LINES = 12  # taller output scrolls
+SUGGESTION_GAP = 6
 
 
 class Level(Enum):
@@ -38,7 +42,42 @@ class Level(Enum):
     ERROR = QStyle.StandardPixmap.SP_MessageBoxCritical
 
 
+class CommandField(QWidget):
+    """A read-only, selectable command line with a Copy button."""
+
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.line = QLineEdit(command)
+        self.line.setReadOnly(True)
+        self.line.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.line.setCursorPosition(0)
+        self.copy_button = QPushButton("Copy")
+        self.copy_button.setToolTip("Copy the command to the clipboard")
+        self.copy_button.setAutoDefault(False)
+        self.copy_button.clicked.connect(self.copy)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.line, stretch=1)
+        layout.addWidget(self.copy_button)
+
+    def copy(self) -> None:
+        QGuiApplication.clipboard().setText(self.line.text())
+
+    def wanted_width(self) -> int:
+        """Width showing the whole command."""
+        return (
+            self.line.fontMetrics().horizontalAdvance(self.line.text())
+            + self.copy_button.sizeHint().width()
+            + 24  # line edit padding, spacing
+        )
+
+
 class CheckResultView(QDialog):
+    """Verdict, program output, what to do next, and a command to look
+    for oneself."""
+
     def __init__(
         self,
         title: str,
@@ -50,6 +89,7 @@ class CheckResultView(QDialog):
         command: str,
         command_label: str,
         note: str | None = None,
+        suggestions: Sequence[Suggestion] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -96,19 +136,37 @@ class CheckResultView(QDialog):
             self.note.setWordWrap(True)
             layout.addWidget(self.note)
 
-        self.command = QLineEdit(command)
-        self.command.setReadOnly(True)
-        self.command.setFont(mono)
-        self.command.setCursorPosition(0)
-        self.copy_button = QPushButton("Copy")
-        self.copy_button.setToolTip("Copy the command to the clipboard")
-        self.copy_button.setAutoDefault(False)
-        self.copy_button.clicked.connect(self._copy_command)
-        command_row = QHBoxLayout()
-        command_row.addWidget(self.command, stretch=1)
-        command_row.addWidget(self.copy_button)
-        layout.addWidget(QLabel(command_label))
-        layout.addLayout(command_row)
+        fields: list[CommandField] = []
+
+        # What to do next: advice, each with a command to copy if any.
+        self.suggestion_labels: list[QLabel] = []
+        self.suggestion_commands: list[CommandField] = []
+        if suggestions:
+            heading = QLabel("<b>What you can do:</b>")
+            heading.setContentsMargins(0, 6, 0, 0)
+            layout.addWidget(heading)
+            for i, suggestion in enumerate(suggestions):
+                label = QLabel(suggestion.text)
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                label.setWordWrap(True)
+                if i:  # a gap between suggestions
+                    label.setContentsMargins(0, SUGGESTION_GAP, 0, 0)
+                layout.addWidget(label)
+                self.suggestion_labels.append(label)
+                if suggestion.command:
+                    field = CommandField(suggestion.command)
+                    layout.addWidget(field)
+                    self.suggestion_commands.append(field)
+                    fields.append(field)
+
+        self.command_field = CommandField(command)
+        self.command = self.command_field.line
+        self.copy_button = self.command_field.copy_button
+        command_heading = QLabel(command_label)
+        command_heading.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(command_heading)
+        layout.addWidget(self.command_field)
+        fields.append(self.command_field)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -117,11 +175,7 @@ class CheckResultView(QDialog):
         # Wide enough to show the whole command and output lines: they
         # are meant to be read.
         margin = layout.contentsMargins().left()
-        wanted = (
-            self.command.fontMetrics().horizontalAdvance(command)
-            + self.copy_button.sizeHint().width()
-            + 4 * margin
-        )
+        wanted = max(f.wanted_width() for f in fields) + 2 * margin
         if self.output is not None:
             longest = max(
                 self.output.fontMetrics().horizontalAdvance(line)
@@ -155,8 +209,6 @@ class CheckResultView(QDialog):
         self.output.setFixedHeight(metrics.lineSpacing() * lines + margins
                                    + metrics.lineSpacing() // 2)
 
-    def _copy_command(self) -> None:
-        QGuiApplication.clipboard().setText(self.command.text())
 
 
 # ------------------------------------------------------------ SSH login
@@ -168,6 +220,7 @@ SSH_VERDICTS = {
         Level.WARNING, "Logged in, but the test command failed"
     ),
     Outcome.FAILED: (Level.ERROR, "Connection failed"),
+    Outcome.NO_KEY: (Level.ERROR, "No SSH key"),
 }
 
 
@@ -180,8 +233,8 @@ def ssh_result_view(
     return CheckResultView(
         SSH_TITLE, level, headline, result.message,
         result.output, "ssh output:",
-        result.command, "Command (to try it in a terminal):",
-        note, parent,
+        result.command, "The check's command (to try it in a terminal):",
+        note, result.suggestions, parent,
     )
 
 
@@ -208,7 +261,7 @@ def daemon_result_view(
         result.message,
         result.log, f"Recent output (last {daemon_check.LOG_LINES} "
         "log lines):" if result.status is not Status.UNKNOWN else "Error:",
-        result.command, "Command (to look in a terminal):",
-        note, parent,
+        result.command, "To look yourself, in a terminal:",
+        note, result.suggestions, parent,
     )
 

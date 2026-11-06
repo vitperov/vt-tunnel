@@ -24,23 +24,64 @@ EXPECTED_COMMAND = (
 )
 
 
+# What `ssh -G` prints for identity files without IdentityFile in the
+# config (OpenSSH 9; other lines left out).
+DEFAULT_G_OUTPUT = "".join(
+    f"identityfile {name}\n" for name in ssh_check.DEFAULT_IDENTITY_FILES
+)
+
+
 @pytest.fixture
-def fake_ssh(tmp_path, monkeypatch):
-    """Install ``ssh`` running the given bash ``body``; it logs its argv
-    (one per line) to the returned file on every call."""
+def home(tmp_path, monkeypatch) -> Path:
+    """A fresh home directory with an empty ~/.ssh (no keys)."""
+    path = tmp_path / "home"
+    (path / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(path))
+    return path
+
+
+@pytest.fixture
+def key(home) -> Path:
+    """A private key at ~/.ssh/id_ed25519."""
+    path = home / ".ssh" / "id_ed25519"
+    path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA x\n")
+    return path
+
+
+def _script(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/bash\n{body}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+@pytest.fixture
+def fake_ssh(tmp_path, home, monkeypatch):
+    """Install ``ssh`` running the given bash ``body`` for a login; it logs
+    the login's argv (one per line) to the returned file.
+
+    ``ssh -G`` (the key lookup) prints ``g_output`` and exits with
+    ``g_exit``; ``ssh-add -l`` exits with ``agent_exit`` (2: no agent).
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "ssh-argv"
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
 
-    def install(body: str) -> Path:
-        script = bin_dir / "ssh"
-        script.write_text(
-            "#!/bin/bash\n"
+    def install(
+        body: str,
+        g_output: str = DEFAULT_G_OUTPUT,
+        g_exit: int = 0,
+        agent_exit: int = 2,
+    ) -> Path:
+        _script(
+            bin_dir / "ssh",
+            'if [ "$1" = -G ]; then\n'
+            f"  printf %s {shlex.quote(g_output)}; exit {g_exit}\n"
+            "fi\n"
             f"printf '%s\\n' \"$@\" > {shlex.quote(str(log))}\n"
-            f"{body}\n"
+            f"{body}",
         )
-        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        _script(bin_dir / "ssh-add", f"exit {agent_exit}")
         return log
 
     return install
@@ -192,15 +233,157 @@ class TestLocalUserNote:
         assert ssh_check.local_user_note("tunnel-user") is None
 
 
+def commands(result) -> list[str]:
+    return [x.command for x in result.suggestions]
+
+
+COPY_ID = f"ssh-copy-id {USER}@{SERVER}"
+
+
+class TestKeyLookup:
+    def test_no_key_skips_the_login(self, fake_ssh):
+        log = fake_ssh(server_ok())
+        result = ssh_check.check(USER, SERVER)
+        assert result.outcome is Outcome.NO_KEY
+        assert not log.exists()  # ssh was never asked to log in
+        assert "~/.ssh/id_ed25519" in result.message
+        assert result.command == EXPECTED_COMMAND
+
+    def test_no_key_suggests_keygen_then_copy_id(self, fake_ssh):
+        fake_ssh(server_ok())
+        result = ssh_check.check(USER, SERVER)
+        assert commands(result) == [ssh_check.KEYGEN_COMMAND, COPY_ID]
+        assert "passphrase empty" in result.suggestions[0].text
+
+    def test_key_file_found(self, fake_ssh, key):
+        log = fake_ssh(server_ok())
+        result = ssh_check.check(USER, SERVER)
+        assert result.outcome is Outcome.OK
+        assert log.exists()
+        assert result.suggestions == ()
+
+    def test_public_key_alone_is_no_key(self, fake_ssh, home):
+        (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA\n")
+        fake_ssh(server_ok())
+        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
+
+    def test_key_in_agent_is_enough(self, fake_ssh):
+        log = fake_ssh(server_ok(), agent_exit=0)
+        assert ssh_check.check(USER, SERVER).outcome is Outcome.OK
+        assert log.exists()
+
+    @pytest.mark.parametrize("agent_exit", [1, 2])  # no keys / no agent
+    def test_agent_without_keys(self, fake_ssh, agent_exit):
+        fake_ssh(server_ok(), agent_exit=agent_exit)
+        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
+
+    def test_identity_file_from_ssh_config(self, fake_ssh, home):
+        # `IdentityFile ~/.ssh/tunnel` in ~/.ssh/config: ssh -G lists it
+        (home / ".ssh" / "tunnel").write_text("key")
+        fake_ssh(server_ok(), g_output="identityfile ~/.ssh/tunnel\n")
+        keys = ssh_check.find_keys(USER, SERVER)
+        assert keys.files == (home / ".ssh" / "tunnel",)
+
+    def test_only_the_configured_identity_file_counts(self, fake_ssh, key):
+        # IdentityFile set: the default id_ed25519 is not what ssh uses
+        fake_ssh(server_ok(), g_output="identityfile ~/.ssh/tunnel\n")
+        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
+
+    def test_tokens_in_identity_file(self, fake_ssh, home):
+        (home / ".ssh" / f"id_{USER}_{SERVER}").write_text("key")
+        fake_ssh(server_ok(), g_output="identityfile %d/.ssh/id_%r_%h\n")
+        assert ssh_check.find_keys(USER, SERVER).files == (
+            home / ".ssh" / f"id_{USER}_{SERVER}",
+        )
+
+    def test_ssh_config_error_falls_back_to_defaults(self, fake_ssh, key):
+        fake_ssh(server_ok(), g_output="", g_exit=255)
+        keys = ssh_check.find_keys(USER, SERVER)
+        assert keys.files == (key,)
+
+    def test_ssh_missing_reports_ssh_not_key(self, tmp_path, monkeypatch,
+                                             home):
+        monkeypatch.setenv("PATH", str(tmp_path))  # no ssh at all
+        result = ssh_check.check(USER, SERVER)
+        assert result.outcome is Outcome.FAILED
+        assert "not found" in result.message
+        assert commands(result) == ["sudo apt install openssh-client"]
+
+
+class TestSuggestions:
+    def run(self, fake_ssh, stderr, code=255):
+        fake_ssh(f"echo {shlex.quote(stderr)} >&2; exit {code}")
+        return ssh_check.check(USER, SERVER)
+
+    def test_permission_denied_suggests_copy_id(self, fake_ssh, key):
+        result = self.run(
+            fake_ssh, f"{USER}@{SERVER}: Permission denied (publickey)."
+        )
+        assert commands(result) == [COPY_ID]
+        assert "doesn't accept your key" in result.suggestions[0].text
+
+    def test_unknown_host_key(self, fake_ssh, key):
+        result = self.run(fake_ssh, "Host key verification failed.")
+        assert commands(result) == [f"ssh {USER}@{SERVER}"]
+        assert "fingerprint" in result.suggestions[0].text
+
+    def test_changed_host_key_warns(self, fake_ssh, key):
+        result = self.run(
+            fake_ssh,
+            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n"
+            "Host key verification failed.",
+        )
+        assert commands(result) == [
+            f"ssh-keygen -R {SERVER}", f"ssh {USER}@{SERVER}"
+        ]
+        assert "intercepting" in result.suggestions[0].text
+        assert result.suggestions[1].text.startswith("Then connect once")
+
+    def test_unknown_host_name(self, fake_ssh, key):
+        result = self.run(
+            fake_ssh,
+            f"ssh: Could not resolve hostname {SERVER}: Name or service "
+            "not known",
+        )
+        assert commands(result) == [""]  # advice, nothing to run
+        assert "REMOTE_SERVER" in result.suggestions[0].text
+
+    @pytest.mark.parametrize("error", [
+        "Connection refused", "Connection timed out", "No route to host",
+        "Network is unreachable",
+    ])
+    def test_unreachable(self, fake_ssh, key, error):
+        result = self.run(
+            fake_ssh, f"ssh: connect to host {SERVER} port 22: {error}"
+        )
+        assert commands(result) == [""]
+        assert "can't be reached" in result.suggestions[0].text
+
+    def test_timeout(self, fake_ssh, key):
+        fake_ssh("sleep 30")
+        result = ssh_check.check(USER, SERVER, timeout=0.5)
+        assert "can't be reached" in result.suggestions[0].text
+
+    def test_other_error_suggests_copy_id(self, fake_ssh, key):
+        result = self.run(fake_ssh, "Something unexpected")
+        assert commands(result) == [COPY_ID]
+
+    def test_command_failed_has_no_suggestions(self, fake_ssh, key):
+        result = self.run(fake_ssh, "restricted", code=1)
+        assert result.outcome is Outcome.COMMAND_FAILED
+        assert result.suggestions == ()
+
+
 # --------------------------------------------------------------------------
 # GUI: the Check button in the editor and the result window
 # --------------------------------------------------------------------------
 
 
 @pytest.fixture
-def editor(qapp, cfg_path, monkeypatch):
+def editor(qapp, cfg_path, monkeypatch, key):
     """An App with the editor open on a new connection filled with valid
-    values; check results are recorded instead of shown modally."""
+    values (and the user has a key); check results are recorded instead of
+    shown modally."""
     app = App(cfg_path)
     app.controller.show()
     app.main_view.add_requested.emit()
@@ -278,6 +461,14 @@ class TestCheckButton:
         [(_, note)] = editor.results
         assert "tunnel-user" in note
 
+    def test_no_key_is_reported_without_login(self, editor, fake_ssh, key):
+        key.unlink()
+        log = fake_ssh(server_ok())
+        editor.connection_view.check_button.click()
+        [(result, _)] = editor.results
+        assert result.outcome is Outcome.NO_KEY
+        assert not log.exists()
+
     def test_busy_cursor_is_restored(self, editor, fake_ssh):
         from PyQt6.QtGui import QGuiApplication
 
@@ -293,7 +484,7 @@ class TestCheckButton:
         def crash(*args):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(ssh_check, "run_check", crash)
+        monkeypatch.setattr(ssh_check, "check", crash)
         with pytest.raises(RuntimeError):
             editor.controller.on_check()
         assert QGuiApplication.overrideCursor() is None
@@ -306,9 +497,10 @@ class TestResultView:
 
         views = []
 
-        def make(outcome, output="", note=None):
+        def make(outcome, output="", note=None, suggestions=()):
             result = ssh_check.CheckResult(
-                outcome, "the message", output, EXPECTED_COMMAND
+                outcome, "the message", output, EXPECTED_COMMAND,
+                tuple(suggestions),
             )
             view = ssh_result_view(result, note)
             views.append(view)
@@ -351,3 +543,42 @@ class TestResultView:
 
         make_view(Outcome.FAILED).copy_button.click()
         assert QGuiApplication.clipboard().text() == EXPECTED_COMMAND
+
+    def test_suggestions_shown_with_copyable_commands(self, make_view):
+        from PyQt6.QtGui import QGuiApplication
+        from vt_tunnel_gui.models.advice import Suggestion
+
+        view = make_view(Outcome.NO_KEY, suggestions=[
+            Suggestion("Create a key.", "ssh-keygen -t ed25519"),
+            Suggestion("Just advice."),
+            Suggestion("Copy it.", COPY_ID),
+        ])
+        assert [x.text() for x in view.suggestion_labels] == [
+            "Create a key.", "Just advice.", "Copy it."
+        ]
+        assert [f.line.text() for f in view.suggestion_commands] == [
+            "ssh-keygen -t ed25519", COPY_ID
+        ]
+        view.suggestion_commands[1].copy_button.click()
+        assert QGuiApplication.clipboard().text() == COPY_ID
+        assert view.command.text() == EXPECTED_COMMAND  # still there
+
+    def test_no_suggestions_section_without_suggestions(self, make_view):
+        view = make_view(Outcome.OK)
+        assert view.suggestion_labels == []
+        assert view.suggestion_commands == []
+
+    def test_no_key_verdict(self, make_view):
+        view = make_view(Outcome.NO_KEY)
+        assert "No SSH key" in view.headline.text()
+        assert view.level.name == "ERROR"
+
+    def test_long_suggested_command_widens_window(self, make_view):
+        from vt_tunnel_gui.models.advice import Suggestion
+
+        long = "ssh-copy-id " + "x" * 90 + "@example.com"
+        plain = make_view(Outcome.FAILED).width()
+        wide = make_view(
+            Outcome.FAILED, suggestions=[Suggestion("t", long)]
+        ).width()
+        assert wide > plain

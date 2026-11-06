@@ -40,6 +40,17 @@ JOURNAL = (
     "Nov 06 12:00:02 host systemd[1]: vt-tunnel.service: Main process "
     "exited, code=exited, status=1/FAILURE"
 )
+ENABLE = f"sudo systemctl enable {SERVICE}"
+START = f"sudo systemctl start {SERVICE}"
+RESTART = f"sudo systemctl restart {SERVICE}"
+UNMASK = f"sudo systemctl unmask {SERVICE}"
+
+
+def commands(result) -> list[str]:
+    """The suggested commands; "" for advice without a command."""
+    return [x.command for x in result.suggestions]
+
+
 PERMISSION_HINT = (
     "Hint: You are currently not seeing messages from other users and the "
     "system.\n      Users in groups 'adm', 'systemd-journal' can see all "
@@ -131,7 +142,8 @@ class TestStates:
         )
         result = run_check(SERVICE)
         assert result.status is Status.NOT_ENABLED
-        assert f"sudo systemctl enable --now {SERVICE}" in result.message
+        assert commands(result) == [ENABLE, START]
+        assert "sudo" not in result.message  # the commands are separate
 
     def test_masked(self, fake_systemd):
         fake_systemd(
@@ -141,7 +153,7 @@ class TestStates:
         result = run_check(SERVICE)
         assert result.status is Status.NOT_ENABLED
         assert "masked" in result.message
-        assert f"unmask {SERVICE}" in result.message
+        assert commands(result) == [UNMASK, ENABLE, START]
 
     def test_failed_shows_exact_daemon_output(self, fake_systemd):
         fake_systemd(
@@ -599,3 +611,67 @@ class TestRowLayout:
         assert label.toolTip() == name
         assert not view.connection_list.horizontalScrollBar().isVisible()
         view.close()
+
+
+class TestSuggestions:
+    def test_not_installed_has_none(self, fake_systemd):
+        fake_systemd(NOT_FOUND)
+        assert run_check(SERVICE).suggestions == ()
+
+    def test_working_and_enabled_needs_nothing(self, fake_systemd):
+        fake_systemd(RUNNING)
+        assert run_check(SERVICE).suggestions == ()
+
+    def test_working_but_not_enabled(self, fake_systemd):
+        fake_systemd(RUNNING | {"UnitFileState": "disabled"})
+        assert commands(run_check(SERVICE)) == [ENABLE]
+
+    def test_failed_points_to_the_ssh_check_then_restart(self, fake_systemd):
+        fake_systemd(RUNNING | {"ActiveState": "failed",
+                                "Result": "exit-code",
+                                "ExecMainStatus": "1"})
+        result = run_check(SERVICE)
+        assert commands(result) == ["", RESTART]
+        advice = result.suggestions[0].text
+        assert "without a password" in advice
+        assert "Check connection" in advice and "Edit" in advice
+
+    def test_failed_and_not_enabled(self, fake_systemd):
+        fake_systemd(RUNNING | {"ActiveState": "failed",
+                                "UnitFileState": "disabled",
+                                "Result": "exit-code"})
+        assert commands(run_check(SERVICE)) == ["", RESTART, ENABLE]
+
+    def test_restart_loop_points_to_the_ssh_check(self, fake_systemd):
+        fake_systemd(RUNNING | {"ActiveState": "activating",
+                                "SubState": "auto-restart"})
+        result = run_check(SERVICE)
+        assert commands(result) == [""]
+        assert result.suggestions[0].text == daemon_check.CHECK_SSH_ADVICE
+
+    def test_enabled_but_stopped_suggests_start(self, fake_systemd):
+        fake_systemd(RUNNING | {"ActiveState": "inactive",
+                                "SubState": "dead"})
+        assert commands(run_check(SERVICE)) == [START]
+
+    def test_bad_unit_file_suggests_daemon_reload(self, fake_systemd):
+        fake_systemd(RUNNING | {"LoadState": "bad-setting",
+                                "ActiveState": "inactive"})
+        assert commands(run_check(SERVICE)) == [
+            "sudo systemctl daemon-reload"
+        ]
+
+    def test_cannot_check_has_none(self, fake_systemd):
+        fake_systemd(show_body="exit 1")
+        assert run_check(SERVICE).suggestions == ()
+
+    def test_shown_in_the_result_window(self, qapp, fake_systemd):
+        from vt_tunnel_gui.views.check_result_view import daemon_result_view
+
+        fake_systemd(RUNNING | {"ActiveState": "inactive",
+                                "SubState": "dead",
+                                "UnitFileState": "disabled"})
+        view = daemon_result_view(run_check(SERVICE))
+        assert [f.line.text() for f in view.suggestion_commands] == [
+            ENABLE, START
+        ]
