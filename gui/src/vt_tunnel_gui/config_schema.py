@@ -43,6 +43,7 @@ class CfgField:
     example: str
     description: str
     dead: bool = False
+    default: str = ""  # pre-filled for a new connection
 
 
 NAME = CfgField(
@@ -87,6 +88,14 @@ REMOTE_SERVER = CfgField(
     description="Server with the external IP and domain name.",
 )
 
+REMOTE_SERVER_SSH_PORT = CfgField(
+    key="REMOTE_SERVER_SSH_PORT",
+    type=FieldType.PORT,
+    example="22",
+    description="SSH port of the remote server (standard: 22).",
+    default="22",
+)
+
 LOCAL_PORT = CfgField(
     key="LOCAL_PORT",
     type=FieldType.PORT,
@@ -109,11 +118,17 @@ FIELDS: tuple[CfgField, ...] = (
     RUN_DAEMON_USER,
     REMOTE_USER,
     REMOTE_SERVER,
+    REMOTE_SERVER_SSH_PORT,
     LOCAL_PORT,
     REMOTE_PORT,
 )
 
 FIELD_BY_KEY: dict[str, CfgField] = {field.key: field for field in FIELDS}
+
+# The values a new connection starts with.
+DEFAULT_VALUES: dict[str, str] = {
+    f.key: f.default for f in FIELDS if f.default
+}
 
 # The keys written in a connection's file: all but NAME (the file name).
 FILE_FIELDS: tuple[CfgField, ...] = tuple(f for f in FIELDS if f is not NAME)

@@ -42,19 +42,21 @@ class Keys:
         return bool(self.files) or self.in_agent
 
 
-def find_keys(user: str, server: str) -> Keys | None:
-    """The keys ssh would use to log in to ``user@server``; ``None`` if
-    ssh can't be run at all."""
-    searched = _identity_files(user, server)
+def find_keys(user: str, server: str, port: str) -> Keys | None:
+    """The keys ssh would use to log in to ``user@server`` on ``port``;
+    ``None`` if ssh can't be run at all."""
+    searched = _identity_files(user, server, port)
     if searched is None:
         return None
     files = tuple(p for p in searched if p.is_file())
     return Keys(files, searched, _agent_has_keys())
 
 
-def _identity_files(user: str, server: str) -> tuple[Path, ...] | None:
+def _identity_files(
+    user: str, server: str, port: str
+) -> tuple[Path, ...] | None:
     """Ask ssh which identity files it would try (honours ~/.ssh/config)."""
-    ran = _run_local([SSH, "-G", f"{user}@{server}"])
+    ran = _run_local([SSH, "-G", "-p", port, f"{user}@{server}"])
     if ran is None:
         return None
     code, stdout = ran
@@ -67,19 +69,20 @@ def _identity_files(user: str, server: str) -> tuple[Path, ...] | None:
         names = list(DEFAULT_IDENTITY_FILES)
     paths = []
     for name in names:
-        path = Path(_expand_tokens(name, user, server)).expanduser()
+        path = Path(_expand_tokens(name, user, server, port)).expanduser()
         if path not in paths:
             paths.append(path)
     return tuple(paths)
 
 
-def _expand_tokens(name: str, user: str, server: str) -> str:
+def _expand_tokens(name: str, user: str, server: str, port: str) -> str:
     """Expand the ssh_config tokens that appear in identity file names
     (whether or not ``ssh -G`` already did)."""
     tokens = {
         "d": str(Path.home()),
         "u": local_user() or "",
         "h": server,
+        "p": port,
         "r": user,
         "%": "%",
     }

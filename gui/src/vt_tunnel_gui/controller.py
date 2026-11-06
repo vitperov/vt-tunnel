@@ -6,7 +6,16 @@ from vt_tunnel_gui.models.connection import Connection
 from vt_tunnel_gui.models.model import ValidationError
 
 # The form fields the connection check uses.
-CHECK_KEYS = (config_schema.REMOTE_USER.key, config_schema.REMOTE_SERVER.key)
+CHECK_KEYS = (
+    config_schema.REMOTE_USER.key,
+    config_schema.REMOTE_SERVER.key,
+    config_schema.REMOTE_SERVER_SSH_PORT.key,
+)
+
+
+def new_connection() -> Connection:
+    """A connection not saved yet: the schema's defaults (e.g. port 22)."""
+    return Connection(config_schema.DEFAULT_VALUES)
 
 
 class Controller:
@@ -114,7 +123,7 @@ class Controller:
             self.connection_view.open_editor()
             return
         self.reload()
-        self._edit(None, Connection())
+        self._edit(None, new_connection())
 
     def _connection_at(self, row: int) -> Connection | None:
         """The connection shown in list ``row`` (as last loaded)."""
@@ -151,7 +160,7 @@ class Controller:
         if saved is not None:
             self._edit(saved.name, saved)
         else:
-            self._edit(None, Connection())  # new, or its file is gone
+            self._edit(None, new_connection())  # new, or its file is gone
 
     def on_delete(self) -> None:
         """After confirmation, delete the edited connection's file."""
@@ -196,6 +205,7 @@ class Controller:
             result = ssh_check.check(
                 connection[config_schema.REMOTE_USER.key],
                 connection[config_schema.REMOTE_SERVER.key],
+                connection[config_schema.REMOTE_SERVER_SSH_PORT.key],
             )
         finally:
             view.set_busy(False)

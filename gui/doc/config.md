@@ -67,11 +67,16 @@ The connection's name is the file name; the file holds the other fields:
 | `RUN_DAEMON_USER` | `username` | local user the tunnel runs as |
 | `REMOTE_USER` | `vasya` | SSH user on the remote server |
 | `REMOTE_SERVER` | `vasya.com` | server with the external IP and domain name |
+| `REMOTE_SERVER_SSH_PORT` | `22` | SSH port of the remote server; a new connection starts with the standard `22` |
 | `LOCAL_PORT` | `22` | local port to expose |
 | `REMOTE_PORT` | `5001` | port bound on the remote server, forwarding back to `LOCAL_PORT` |
 
-There is no SSH port key: ssh uses its default port, or what
-`~/.ssh/config` of `RUN_DAEMON_USER` says for the server.
+`REMOTE_SERVER_SSH_PORT` is the port ssh connects to on the server. It
+is required and always passed to ssh (`-p`), so it overrides a `Port`
+for that host in `~/.ssh/config`. A file from before the key existed
+lacks it: the GUI shows the field empty and asks for a value on save (it
+doesn't assume 22, since the daemon wouldn't either). Not to be confused
+with the old single-file config's `REMOTE_SSH_PORT`.
 
 Example, `/etc/vt-tunnel/connections.d/home.conf` as written by the GUI:
 
@@ -81,6 +86,7 @@ Example, `/etc/vt-tunnel/connections.d/home.conf` as written by the GUI:
     RUN_DAEMON_USER=username
     REMOTE_USER=vasya
     REMOTE_SERVER=vasya.com
+    REMOTE_SERVER_SSH_PORT=22
     LOCAL_PORT=22
     REMOTE_PORT=5001
 
@@ -109,13 +115,14 @@ The current `vt-tunnel.service` interpolates the values into a `bash -c`
 string (with the old key names), and a per-connection template built the
 same way would do so with these keys:
 
-    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
+    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p ${REMOTE_SERVER_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
 
 Because values flow verbatim into that shell line, a hand-edited file can
 inject shell commands. Any code that writes a connection file (GUI or
 helper) must validate strictly before writing:
 
-- `LOCAL_PORT`, `REMOTE_PORT`: integer, `1`–`65535`
+- `REMOTE_SERVER_SSH_PORT`, `LOCAL_PORT`, `REMOTE_PORT`: integer, `1`–`65535`
+  (ASCII digits only: no sign, spaces or options such as `22 -oX=y`)
 - `REMOTE_USER`, `RUN_DAEMON_USER`, `REMOTE_SERVER`: conservative charset
   — letters, digits, `.`, `-`, `_`; no whitespace, quotes, `$`, `;`, `|`,
   `&`, backticks or other shell metacharacters; must not start with `-`,

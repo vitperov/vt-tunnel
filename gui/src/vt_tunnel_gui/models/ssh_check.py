@@ -8,9 +8,8 @@ with ssh's own error message instead of waiting for input. On the server
 it runs a command with a known output, to tell "logged in" apart from
 "ssh printed nothing".
 
-The port is not passed: like the daemon, ssh uses its default port or
-``~/.ssh/config`` (connections have no SSH port key, see
-``doc/config.md``).
+The server's SSH port (REMOTE_SERVER_SSH_PORT) is passed with ``-p``, like the
+daemon does; so are the suggested commands (``ssh-copy-id -p`` ...).
 
 The check blocks for up to :data:`CHECK_TIMEOUT_S` seconds (plus a
 moment for the key lookup). Failed results come with suggestions, e.g.
@@ -60,15 +59,14 @@ class CheckResult:
 
 
 def check(
-    user: str, server: str, timeout: float = CHECK_TIMEOUT_S
+    user: str, server: str, port: str, timeout: float = CHECK_TIMEOUT_S
 ) -> CheckResult:
     """Look for a key, then (if there is one) try to log in with it.
 
-    ``user`` and ``server`` must be validated identifiers, see
+    ``user``, ``server`` and ``port`` must be validated, see
     :func:`run_check`.
     """
-    target = f"{user}@{server}"
-    keys = ssh_keys.find_keys(user, server)
+    keys = ssh_keys.find_keys(user, server, port)
     if keys is not None and not keys:
         searched = ", ".join(ssh_keys.display_path(p) for p in keys.searched)
         return CheckResult(
@@ -77,30 +75,29 @@ def check(
             f"{searched or 'the identity files'} exists, and ssh-agent "
             "holds none. The login was not tried.",
             "",
-            shlex.join(ssh_command(user, server)),
+            shlex.join(ssh_command(user, server, port)),
             (
                 Suggestion(
                     "Create a key. Leave the passphrase empty: the tunnel "
                     "starts unattended and can't type it.",
                     ssh_keys.KEYGEN_COMMAND,
                 ),
-                _copy_id(target, "Then put it on the server"),
+                _copy_id(user, server, port, "Then put it on the server"),
             ),
         )
     # No `keys` (ssh -G didn't run): the login attempt reports why.
-    result = run_check(user, server, timeout)
+    result = run_check(user, server, port, timeout)
     return dataclasses.replace(
-        result, suggestions=suggestions_for(result, user, server)
+        result, suggestions=suggestions_for(result, user, server, port)
     )
 
 
 def suggestions_for(
-    result: CheckResult, user: str, server: str
+    result: CheckResult, user: str, server: str, port: str
 ) -> tuple[Suggestion, ...]:
     """What to do about a failed login, judged by ssh's message."""
     if result.outcome is not Outcome.FAILED:
         return ()
-    target = f"{user}@{server}"
     output = result.output
     if "REMOTE HOST IDENTIFICATION HAS CHANGED" in output:
         return (
@@ -110,13 +107,16 @@ def suggestions_for(
                 "intercepting the connection. Only if you know why it "
                 "changed, remove the old key, then connect once to accept "
                 "the new one:",
-                shlex.join(["ssh-keygen", "-R", server]),
+                shlex.join(
+                    ["ssh-keygen", "-R", known_hosts_name(server, port)]
+                ),
             ),
-            _first_login(target, "Then connect once in a terminal"),
+            _first_login(user, server, port,
+                         "Then connect once in a terminal"),
         )
     if "Host key verification failed" in output:
         return (_first_login(
-            target,
+            user, server, port,
             "ssh doesn't know this server's host key yet. Connect once in "
             "a terminal",
         ),)
@@ -129,9 +129,9 @@ def suggestions_for(
         "No answer"
     ):
         return (Suggestion(
-            f"{server} can't be reached: check your network, that the "
-            "server is up and runs an SSH server, and on which port (ssh "
-            "uses 22, or what ~/.ssh/config says for this host)."
+            f"{server} can't be reached on port {port}: check your "
+            "network, that the server is up, and that its SSH server "
+            f"listens on port {port} (REMOTE_SERVER_SSH_PORT)."
         ),)
     if result.message.startswith(f"'{SSH}' was not found"):
         return (Suggestion(
@@ -139,10 +139,12 @@ def suggestions_for(
         ),)
     if "Permission denied" in output:
         return (_copy_id(
-            target, "The server doesn't accept your key. Put it there"
+            user, server, port,
+            "The server doesn't accept your key. Put it there",
         ),)
-    return (_copy_id(target, "If your key isn't on the server yet, put it "
-                             "there"),)
+    return (_copy_id(
+        user, server, port, "If your key isn't on the server yet, put it there"
+    ),)
 
 
 _UNREACHABLE = (
@@ -155,45 +157,55 @@ _UNREACHABLE = (
 )
 
 
-def _copy_id(target: str, lead: str) -> Suggestion:
+def _copy_id(user: str, server: str, port: str, lead: str) -> Suggestion:
     return Suggestion(
         f"{lead}: ssh-copy-id logs in with your password once (in a "
         "terminal) and adds your public key to the server's "
         "authorized_keys.",
-        shlex.join(["ssh-copy-id", target]),
+        shlex.join(["ssh-copy-id", "-p", port, f"{user}@{server}"]),
     )
 
 
-def _first_login(target: str, lead: str) -> Suggestion:
+def _first_login(user: str, server: str, port: str, lead: str) -> Suggestion:
     return Suggestion(
         f"{lead}, check the fingerprint it shows and answer \"yes\" (it "
         "may ask for your password); you can quit right after.",
-        shlex.join(["ssh", target]),
+        shlex.join(["ssh", "-p", port, f"{user}@{server}"]),
     )
 
 
+def known_hosts_name(server: str, port: str) -> str:
+    """How ~/.ssh/known_hosts names the server: ``[server]:port`` unless
+    the port is the standard 22."""
+    return server if port == "22" else f"[{server}]:{port}"
+
+
 def ssh_command(
-    user: str, server: str, timeout: int = CHECK_TIMEOUT_S
+    user: str, server: str, port: str, timeout: int = CHECK_TIMEOUT_S
 ) -> list[str]:
-    """The ssh argv. ``user`` and ``server`` must be validated already."""
+    """The ssh argv. ``user``, ``server`` and ``port`` must be validated
+    already."""
     return [
         SSH,
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={timeout}",
+        "-p", port,
         f"{user}@{server}",
         REMOTE_COMMAND,
     ]
 
 
 def run_check(
-    user: str, server: str, timeout: float = CHECK_TIMEOUT_S
+    user: str, server: str, port: str, timeout: float = CHECK_TIMEOUT_S
 ) -> CheckResult:
-    """Try to log in to ``user@server`` and run the test command.
+    """Try to log in to ``user@server`` on ``port`` and run the test
+    command.
 
-    ``user`` and ``server`` must be validated identifiers: they go to ssh
-    as is, and one starting with ``-`` would be taken for an option.
+    ``user`` and ``server`` must be validated identifiers, ``port`` a
+    validated port: they go to ssh as is, and one starting with ``-``
+    would be taken for an option.
     """
-    argv = ssh_command(user, server)
+    argv = ssh_command(user, server, port)
     command = shlex.join(argv)
     target = f"{user}@{server}"
     try:
@@ -216,7 +228,8 @@ def run_check(
                 stdout, stderr = process.communicate()
                 return CheckResult(
                     Outcome.FAILED,
-                    f"No answer from {server} within {timeout:g} seconds.",
+                    f"No answer from {server} (port {port}) within "
+                    f"{timeout:g} seconds.",
                     _join(stderr, stdout),
                     command,
                 )

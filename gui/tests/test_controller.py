@@ -226,3 +226,56 @@ class TestDelete:
         assert title == "Delete failed"
         assert files(config_dir) == ["home.conf", "office.conf"]
         assert two.connection_view.isVisible()
+
+
+class TestSshPort:
+    def test_new_connection_starts_with_port_22(self, app):
+        app.main_view.add_button.click()
+        assert app.connection_view.values()["REMOTE_SERVER_SSH_PORT"] == "22"
+
+    def test_reset_of_a_new_connection_keeps_the_default(self, app):
+        app.main_view.add_button.click()
+        set_field(app, "REMOTE_SERVER_SSH_PORT", "2222")
+        app.connection_view.reset_button.click()
+        assert app.connection_view.values()["REMOTE_SERVER_SSH_PORT"] == "22"
+
+    def test_custom_port_is_saved(self, app, config_dir):
+        app.main_view.add_button.click()
+        app.connection_view.set_values(
+            VALID_VALUES | {"REMOTE_SERVER_SSH_PORT": "2222"}
+        )
+        app.connection_view.save_button.click()
+        assert "REMOTE_SERVER_SSH_PORT=2222\n" in (
+            config_dir / "home.conf"
+        ).read_text()
+
+    def test_file_without_the_key_must_get_a_value(self, app, config_dir):
+        # A file from before REMOTE_SERVER_SSH_PORT existed: shown empty (not
+        # silently 22: the daemon wouldn't get 22 either), and saving
+        # asks for a value.
+        values = dict(VALID_VALUES)
+        del values["REMOTE_SERVER_SSH_PORT"]
+        path = write_conf(config_dir, values)
+        before = path.read_text()
+        app.controller.reload()
+        open_row(app, 0)
+        assert app.connection_view.values()["REMOTE_SERVER_SSH_PORT"] == ""
+        app.connection_view.save_button.click()
+        [(_, text)] = app.errors
+        assert text.startswith("REMOTE_SERVER_SSH_PORT:")
+        assert path.read_text() == before
+        set_field(app, "REMOTE_SERVER_SSH_PORT", "22")
+        app.connection_view.save_button.click()
+        assert path.read_text() == before + "REMOTE_SERVER_SSH_PORT=22\n"
+
+    def test_list_shows_a_non_standard_port(self, app, config_dir):
+        write_conf(config_dir, VALID_VALUES)
+        write_conf(
+            config_dir, OTHER_VALUES | {"REMOTE_SERVER_SSH_PORT": "2222"}
+        )
+        app.controller.reload()
+        home, office = app.main_view.rows
+        assert home.summary_label.text().startswith("vasya@vasya.com \u00b7")
+        assert office.summary_label.text().startswith(
+            "vasya@office.example.com:2222 \u00b7"
+        )

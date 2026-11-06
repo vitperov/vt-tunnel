@@ -257,6 +257,9 @@ def fake_ssh(tmp_path, home, monkeypatch):
     bin_dir.mkdir()
     log = tmp_path / "ssh-argv"
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    # Never reach the real ssh-agent of whoever runs the tests (a real
+    # ssh-add in /usr/bin would report its keys).
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
 
     def install(
         body: str,

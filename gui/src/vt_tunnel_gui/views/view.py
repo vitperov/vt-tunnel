@@ -56,7 +56,11 @@ def summary(values: dict[str, str]) -> str:
     parts = []
     user = get(config_schema.REMOTE_USER.key, "")
     server = get(config_schema.REMOTE_SERVER.key, "")
+    ssh_port_field = config_schema.REMOTE_SERVER_SSH_PORT
+    ssh_port = get(ssh_port_field.key, "")
     if server:
+        if ssh_port and ssh_port != ssh_port_field.default:
+            server = f"{server}:{ssh_port}"
         parts.append(f"{user}@{server}" if user else server)
     local = get(config_schema.LOCAL_PORT.key, "")
     remote = get(config_schema.REMOTE_PORT.key, "")

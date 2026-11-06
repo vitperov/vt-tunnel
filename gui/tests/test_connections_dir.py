@@ -39,6 +39,7 @@ ENABLED=false
 RUN_DAEMON_USER=username
 REMOTE_USER=vasya
 REMOTE_SERVER=vasya.com
+REMOTE_SERVER_SSH_PORT=22
 LOCAL_PORT=22
 REMOTE_PORT=5001
 """
@@ -331,6 +332,7 @@ class TestWriteExisting:
             "ENABLED=false\n"
             "RUN_DAEMON_USER=username\n"
             "REMOTE_SERVER=vasya.com\n"
+            "REMOTE_SERVER_SSH_PORT=22\n"
         )
 
     def test_rewrite_is_idempotent(self, store):
