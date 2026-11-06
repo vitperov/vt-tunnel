@@ -6,32 +6,78 @@ from vt_tunnel_gui.models.connection import Connection
 
 
 class Controller:
-    """Coordinates the model, the connection list and the editor window.
+    """Coordinates the model, the connection list, the editor window and
+    the tray icon.
 
     Remembers which list row the editor shows (``None`` for a connection
     that isn't saved yet). Every change saves the whole list, so the
     numbering in the file always follows the list order.
+
+    Hiding the main window (from the tray, or by closing it) hides an open
+    editor with it; showing the main window brings the editor back, with
+    its edits intact.
     """
 
-    def __init__(self, model, main_view, connection_view) -> None:
+    def __init__(
+        self, model, main_view, connection_view, tray_view, quit_app
+    ) -> None:
         self.model = model
         self.main_view = main_view
         self.connection_view = connection_view
+        self.tray_view = tray_view
+        self._quit_app = quit_app
         self._editing: int | None = None
+        # The editor was open when the main window got hidden.
+        self._editor_hidden = False
 
         self.main_view.connection_activated.connect(
             self.on_connection_activated
         )
         self.main_view.add_requested.connect(self.on_add_requested)
+        self.main_view.visibility_changed.connect(
+            self.on_main_visibility_changed
+        )
         self.connection_view.save_requested.connect(self.on_save)
         self.connection_view.reset_requested.connect(self.on_reset)
         self.connection_view.delete_requested.connect(self.on_delete)
+        self.tray_view.show_hide_requested.connect(self.on_show_hide_requested)
+        self.tray_view.exit_requested.connect(self.on_exit_requested)
 
         self.reload()
 
     def show(self) -> None:
-        """Show the main window."""
-        self.main_view.show()
+        """Show the tray icon and the main window."""
+        self.tray_view.show()
+        self.show_main_window()
+
+    def show_main_window(self) -> None:
+        """Bring the main window (and an editor hidden with it) to front."""
+        self.main_view.bring_to_front()
+        if self._editor_hidden:
+            self._editor_hidden = False
+            self.connection_view.open_editor()
+
+    def hide_main_window(self) -> None:
+        self.main_view.hide()
+
+    # ------------------------------------------------------------ tray
+
+    def on_show_hide_requested(self) -> None:
+        if self.main_view.isVisible():
+            self.hide_main_window()
+        else:
+            self.show_main_window()
+
+    def on_exit_requested(self) -> None:
+        self.tray_view.hide()
+        self._quit_app()
+
+    def on_main_visibility_changed(self, visible: bool) -> None:
+        """Keep the tray label in sync; hide the editor with the window."""
+        self.tray_view.set_window_visible(visible)
+        if not visible and self.connection_view.isVisible():
+            self._editor_hidden = True
+            self.connection_view.hide()  # hide(), not close: keep the edits
 
     def reload(self) -> None:
         """Re-read the config file and refresh the connection list."""

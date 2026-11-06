@@ -2,13 +2,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.controller import Controller
 from vt_tunnel_gui.models.model import Model
 from vt_tunnel_gui.models.tunnel_config import TunnelConfig
 from vt_tunnel_gui.views.connection_view import ConnectionView
+from vt_tunnel_gui.views.tray_view import TrayView
 from vt_tunnel_gui.views.view import MainWindow
 
 
@@ -42,9 +43,18 @@ def main() -> int:
     # Resolve a relative path once, against the startup working directory.
     config_path = args.config.absolute()
 
+    # With a tray, closing the main window only hides it to the tray; the
+    # app quits via the tray's Exit. Without one (no tray host running),
+    # that would leave an unreachable process, so closing still quits.
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        app.setQuitOnLastWindowClosed(False)
+
     model = Model(TunnelConfig(config_path))
     main_view = MainWindow()
     connection_view = ConnectionView(main_view)
-    controller = Controller(model, main_view, connection_view)
+    tray_view = TrayView()
+    controller = Controller(
+        model, main_view, connection_view, tray_view, app.quit
+    )
     controller.show()
     return app.exec()

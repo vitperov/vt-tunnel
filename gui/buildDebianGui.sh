@@ -49,11 +49,12 @@ sys.exit(main())
 EOF
 chmod 755 $PACKAGE_DIR/usr/bin/$PROJ_NAME
 
-# Python module: recursive copy so subpackages (views/, models/) ship too;
-# bytecode caches are dev leftovers and must not land in the package
+# Python module: recursive copy so subpackages (views/, models/) and data
+# files (resources/tray.png) ship too; bytecode caches are dev leftovers
+# and must not land in the package
 cp -r $ROOT_DIR/$MODULE_SRC_DIR/. $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME/
 find $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME -type d -name __pycache__ -exec rm -rf {} +
-find $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME -type f -name '*.py' -exec chmod 644 {} +
+find $PACKAGE_DIR/$MODULE_INSTALL_DIR$MODULE_NAME -type f -exec chmod 644 {} +
 
 # Desktop entry and polkit policy
 cp $ROOT_DIR/$DESKTOP_SRC_DIR/$DESKTOP_FILE $PACKAGE_DIR/$DESKTOP_INSTALL_DIR

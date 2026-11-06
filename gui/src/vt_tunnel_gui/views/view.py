@@ -7,6 +7,7 @@ happens.
 """
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QHideEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
@@ -23,12 +24,15 @@ UNNAMED = "(unnamed)"
 class MainWindow(QMainWindow):
     """Lists the connections.
 
-    Emits ``connection_activated(row)`` when a connection row is clicked
-    and ``add_requested()`` when "+" is pressed.
+    Emits ``connection_activated(row)`` when a connection row is clicked,
+    ``add_requested()`` when "+" is pressed, and ``visibility_changed(bool)``
+    when the window is shown or hidden (closing it hides it). Minimizing
+    and restoring don't count: the window stays visible.
     """
 
     connection_activated = pyqtSignal(int)
     add_requested = pyqtSignal()
+    visibility_changed = pyqtSignal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -45,6 +49,30 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.connection_list)
 
         self.set_connections([])
+
+    def bring_to_front(self) -> None:
+        """Show the window, un-minimized and on top."""
+        if self.isMinimized():
+            self.setWindowState(
+                self.windowState() & ~Qt.WindowState.WindowMinimized
+            )
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    # Spontaneous show/hide events come from the window system (e.g. on
+    # minimize/restore); only our own show()/hide()/close() change
+    # visibility.
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not event.spontaneous():
+            self.visibility_changed.emit(True)
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        super().hideEvent(event)
+        if not event.spontaneous():
+            self.visibility_changed.emit(False)
 
     def _on_item_activated(self, item: QListWidgetItem) -> None:
         row = self.connection_list.row(item)
