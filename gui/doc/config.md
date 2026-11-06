@@ -76,13 +76,7 @@ comments need not be.
 
 `vt-tunnel.service` interpolates the values into a `bash -c` string:
 
-    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
-
-> **Pending daemon update:** this is the current `vt-tunnel.service`. It
-> still reads the old keys `REMOTE_SSH_PORT`, `LOCAL_PORT1` and
-> `REMOTE_PORT1`, which the schema replaced with `LOCAL_PORT` and
-> `REMOTE_PORT` (`REMOTE_SSH_PORT` was dropped: ssh uses its default port
-> or `~/.ssh/config`). The unit has to be updated to the new keys.
+    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N ${REMOTE_USER1}@${REMOTE_SERVER1} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER1}
 
 Because config values flow verbatim into that shell line, a hand-edited
 cfg can inject shell commands. Any code that writes this file (GUI or

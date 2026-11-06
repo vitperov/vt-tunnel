@@ -81,9 +81,6 @@ def make_config(cfg_path: Path) -> Callable[[str], TunnelConfig]:
 #   ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N
 #       ${REMOTE_USER}@${REMOTE_SERVER}
 #       -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
-#
-# (the daemon unit is still to be updated to the new keys, see
-# doc/config.md)
 
 DANGEROUS_IDENTIFIERS = [
     pytest.param("vasya smith", id="space"),
