@@ -44,7 +44,7 @@ preserved verbatim when the file is rewritten; comments need not be.
 
 `vt-tunnel.service` interpolates the values into a `bash -c` string:
 
-    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p${REMOTE_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER}
+    ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N ${REMOTE_USER1}@${REMOTE_SERVER1} -R ${REMOTE_PORT1}:localhost:${LOCAL_PORT1}' ${RUN_DAEMON_USER1}
 
 Because config values flow verbatim into that shell line, a hand-edited
 cfg can inject shell commands. Any code that writes this file (GUI or
