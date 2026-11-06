@@ -1,8 +1,8 @@
 """One tunnel connection: the fields of ``config_schema``, without index.
 
-In the config file the fields of connection N carry an index suffix
-(``NAME1``, ``ENABLED1``, ...); that numbering is the file's business
-(see ``tunnel_config``). A Connection only knows its own field values.
+In the config directory each connection is one file, named after the
+connection (see ``connections_dir``). A Connection only knows its own
+field values, NAME included.
 """
 
 import re
@@ -11,13 +11,14 @@ from collections.abc import Iterable, Mapping
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.config_schema import CfgField, FieldType
 
-COMMENT_CHAR = "#"
 
 _PORT_RE = re.compile(r"[0-9]+")  # ASCII digits only; int() is too lenient
 _IDENTIFIER_RE = re.compile(config_schema.IDENTIFIER_PATTERN)
-# Can't be stored in a value: they would end it early, or be lost or
-# mangled when the file is read back.
-_UNSTORABLE_CHARS = ("\n", "\r", "\0", COMMENT_CHAR)
+_NAME_RE = re.compile(config_schema.NAME_PATTERN)
+# Can't be stored in a value as is: line breaks and NUL end it; systemd
+# (EnvironmentFile=) reads backslashes as escapes or line continuations
+# and strips quotes, so the daemon would see a different value.
+_UNSTORABLE_CHARS = ("\n", "\r", "\0", "\\", '"', "'")
 
 
 def _field_error(field: CfgField, value: str) -> str | None:
@@ -28,6 +29,13 @@ def _field_error(field: CfgField, value: str) -> str | None:
             return (
                 f"{field.key}: must be an integer from "
                 f"{config_schema.PORT_MIN} to {config_schema.PORT_MAX}"
+            )
+    elif field.type is FieldType.NAME:
+        if not _NAME_RE.fullmatch(value):
+            return (
+                f"{field.key}: must be 1 to {config_schema.NAME_MAX_LENGTH} "
+                "letters, digits, '.', '-' and '_', starting with a letter "
+                "or digit"
             )
     elif field.type is FieldType.IDENTIFIER:
         if not _IDENTIFIER_RE.fullmatch(value):

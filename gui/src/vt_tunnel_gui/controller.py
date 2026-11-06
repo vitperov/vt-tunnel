@@ -1,10 +1,9 @@
 """Controller wiring the model and the views."""
 
-from collections.abc import Sequence
-
 from vt_tunnel_gui import config_schema
-from vt_tunnel_gui.models import daemon_check, ssh_check
+from vt_tunnel_gui.models import daemon_check, ssh_check, ssh_keys
 from vt_tunnel_gui.models.connection import Connection
+from vt_tunnel_gui.models.model import ValidationError
 
 # The form fields the connection check uses.
 CHECK_KEYS = (config_schema.REMOTE_USER.key, config_schema.REMOTE_SERVER.key)
@@ -14,9 +13,9 @@ class Controller:
     """Coordinates the model, the connection list, the editor window and
     the tray icon.
 
-    Remembers which list row the editor shows (``None`` for a connection
-    that isn't saved yet). Every change saves the whole list, so the
-    numbering in the file always follows the list order.
+    Remembers the name the edited connection is saved under (``None`` for
+    a connection that isn't saved yet): each connection is its own file,
+    so Save writes (or renames) just that one, Delete removes it.
 
     Hiding the main window (from the tray, or by closing it) hides an open
     editor with it; showing the main window brings the editor back, with
@@ -31,7 +30,7 @@ class Controller:
         self.connection_view = connection_view
         self.tray_view = tray_view
         self._quit_app = quit_app
-        self._editing: int | None = None
+        self._editing: str | None = None  # saved name of the edited one
         # The editor was open when the main window got hidden.
         self._editor_hidden = False
 
@@ -96,14 +95,18 @@ class Controller:
     # ------------------------------------------------------------ opening
 
     def on_connection_activated(self, row: int) -> None:
-        """Open the clicked connection, fresh from the file."""
+        """Open the clicked connection, fresh from its file."""
         if self.connection_view.isVisible():
             self.connection_view.open_editor()  # don't clobber open edits
             return
+        clicked = self._connection_at(row)
         self.reload()
-        connections = self.model.connections()
-        if 0 <= row < len(connections):
-            self._edit(row, connections[row])
+        if clicked is None:
+            return
+        # Reloaded by name: the list may have changed on disk meanwhile.
+        connection = self.model.find(clicked.name)
+        if connection is not None:
+            self._edit(connection.name, connection)
 
     def on_add_requested(self) -> None:
         """Open the editor for a new, empty connection (saved on Save)."""
@@ -113,52 +116,60 @@ class Controller:
         self.reload()
         self._edit(None, Connection())
 
-    def _edit(self, row: int | None, connection: Connection) -> None:
-        self._editing = row
+    def _connection_at(self, row: int) -> Connection | None:
+        """The connection shown in list ``row`` (as last loaded)."""
+        connections = self.model.connections()
+        return connections[row] if 0 <= row < len(connections) else None
+
+    def _edit(self, name: str | None, connection: Connection) -> None:
+        self._editing = name
         self.connection_view.set_values(connection.values())
-        self.connection_view.set_new(row is None)
+        self.connection_view.set_new(name is None)
         self.connection_view.open_editor()
 
     # ------------------------------------------------------------ actions
 
     def on_save(self) -> None:
-        """Save the edited (or new) connection together with the others."""
-        connections = self.model.connections()
+        """Save the edited (or new) connection to its file."""
         edited = Connection(self.connection_view.values())
-        if self._editing is None:
-            connections.append(edited)
-            row = len(connections) - 1
-        else:
-            row = self._editing
-            connections[row] = edited
-        if not self._save(connections):
+        if not self._save(edited):
             return
         self.reload()
-        # A new connection is saved now: further Saves edit it in place.
-        self._edit(row, self.model.connections()[row])
-        self.connection_view.show_status(f"Saved {self.model.config_path}")
+        # Saved now (maybe under a new name): further Saves edit that file.
+        self._edit(edited.name, self.model.find(edited.name) or edited)
+        self.connection_view.show_status(
+            f"Saved {self.model.path_of(edited.name)}"
+        )
 
     def on_reset(self) -> None:
         """Discard edits: refill the editor from the file."""
         self.reload()
-        connections = self.model.connections()
-        if self._editing is not None and self._editing < len(connections):
-            self._edit(self._editing, connections[self._editing])
+        saved = (
+            self.model.find(self._editing)
+            if self._editing is not None else None
+        )
+        if saved is not None:
+            self._edit(saved.name, saved)
         else:
-            self._edit(None, Connection())  # new, or gone from the file
+            self._edit(None, Connection())  # new, or its file is gone
 
     def on_delete(self) -> None:
-        """After confirmation, remove the edited connection and save."""
+        """After confirmation, delete the edited connection's file."""
         if self._editing is None:
             return
-        connections = self.model.connections()
-        connection = connections[self._editing]
+        name = self._editing
         if not self.connection_view.confirm_delete(
-            connection.name or "(unnamed)", self.model.config_path
+            name or "(unnamed)", self.model.path_of(name)
         ):
             return
-        del connections[self._editing]
-        if not self._save(connections):
+        try:
+            self.model.delete(name)
+        except OSError as err:
+            self.connection_view.show_error(
+                "Delete failed",
+                f"Can't delete {self.model.path_of(name)}:\n"
+                f"{err.strerror or err}",
+            )
             return
         self._editing = None
         self.connection_view.close_editor()
@@ -190,36 +201,40 @@ class Controller:
             view.set_busy(False)
         view.show_check_result(
             result,
-            ssh_check.local_user_note(
+            ssh_keys.local_user_note(
                 connection[config_schema.RUN_DAEMON_USER.key]
             ),
         )
 
     def on_daemon_check(self, row: int) -> None:
         """Check the systemd service running the connection in ``row``."""
-        number = row + 1  # connections are numbered from 1 in the file
+        connection = self._connection_at(row)
+        if connection is None:
+            return
+        service = daemon_check.service_for(connection.name)
         self.main_view.set_busy(row, True)
         try:
-            result = daemon_check.run_check(daemon_check.service_for(number))
+            result = daemon_check.run_check(service)
         finally:
             self.main_view.set_busy(row, False)
         self.main_view.show_daemon_result(
-            result, daemon_check.coverage_note(number)
+            result, daemon_check.coverage_note(connection.name)
         )
 
-    def _save(self, connections: Sequence[Connection]) -> bool:
+    def _save(self, connection: Connection) -> bool:
         """Validate and write; report problems in the editor. True if saved."""
         view = self.connection_view
-        path = self.model.config_path
-        errors = self.model.validate(connections)
+        errors = self.model.validate(connection, self._editing)
         if errors:
             view.show_error("Invalid values", "\n".join(errors))
             return False
-        if not self.model.config_exists() and not view.confirm_create(path):
-            return False
         try:
-            self.model.save(connections)
+            self.model.save(connection, self._editing)
+        except ValidationError as err:  # e.g. the name got taken meanwhile
+            view.show_error("Invalid values", "\n".join(err.errors))
+            return False
         except OSError as err:
+            path = err.filename or self.model.path_of(connection.name)
             view.show_error(
                 "Save failed", f"Can't save {path}:\n{err.strerror or err}"
             )

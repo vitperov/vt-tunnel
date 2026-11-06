@@ -28,7 +28,7 @@ from vt_tunnel_gui.config_schema import CfgField
 from vt_tunnel_gui.models.ssh_check import CheckResult
 from vt_tunnel_gui.views.check_result_view import ssh_result_view
 
-# Values of the boolean ENABLED key as written in the cfg file.
+# Values of the boolean ENABLED key as written in a connection file.
 BOOL_TRUE = "true"
 BOOL_FALSE = "false"
 
@@ -52,7 +52,7 @@ class ConnectionView(QDialog):
     so the Delete button is hidden.
 
     Values are exchanged as ``dict[str, str]`` keyed by config key, holding
-    the raw strings as they appear in the cfg file.
+    the raw strings as they appear in the connection file.
     """
 
     save_requested = pyqtSignal()
@@ -182,23 +182,12 @@ class ConnectionView(QDialog):
         self.accept()
 
     def confirm_delete(self, name: str, path: Path) -> bool:
-        """Ask whether to delete connection ``name`` from ``path``."""
+        """Ask whether to delete connection ``name`` (its file ``path``)."""
         answer = QMessageBox.question(
             self,
             "Delete connection?",
             f"Delete connection \"{name}\"?\n\n"
-            f"It will be removed from {path} right away.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return answer == QMessageBox.StandardButton.Yes
-
-    def confirm_create(self, path: Path) -> bool:
-        """Ask whether to create the missing config file ``path``."""
-        answer = QMessageBox.question(
-            self,
-            "Create config file?",
-            f"The config file {path} does not exist.\n\nCreate it?",
+            f"Its file {path} will be deleted right away.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

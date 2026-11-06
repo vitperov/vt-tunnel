@@ -108,7 +108,9 @@ class TestInvalidValues:
         assert invalid_keys(valid_values | {key: ""}) == [key]
 
     def test_empty_connection_reports_every_required_field(self):
-        assert sorted(invalid_keys({})) == sorted(PORT_KEYS + IDENTIFIER_KEYS)
+        assert sorted(invalid_keys({})) == sorted(
+            PORT_KEYS + IDENTIFIER_KEYS + ["NAME"]
+        )
 
     def test_all_errors_are_reported_at_once(self, valid_values):
         values = valid_values | {"LOCAL_PORT": "65536", "REMOTE_PORT": "-5"}
@@ -134,7 +136,11 @@ class TestInvalidValues:
         "value",
         [
             pytest.param("true\nREMOTE_USER1=x", id="newline-injects-key"),
-            pytest.param("true # x", id="hash-comment"),
+            # systemd reads backslashes as escapes, strips quotes
+            pytest.param("tr\\ue", id="backslash"),
+            pytest.param("true\\", id="line-continuation"),
+            pytest.param('"true"', id="double-quotes"),
+            pytest.param("'true'", id="single-quotes"),
             pytest.param("true\r", id="carriage-return"),
             pytest.param("true\x00", id="nul"),
             pytest.param(" true", id="leading-space"),
@@ -142,3 +148,39 @@ class TestInvalidValues:
     )
     def test_enabled_cannot_break_the_file(self, valid_values, value):
         assert invalid_keys(valid_values | {"ENABLED": value}) == ["ENABLED"]
+
+
+class TestName:
+    """NAME is a file name (<NAME>.conf) and a systemd instance name."""
+
+    @pytest.mark.parametrize("name", [
+        "home", "Home2", "office-web", "nas_backup", "a.b", "7",
+        "x" * config_schema.NAME_MAX_LENGTH,
+    ])
+    def test_valid(self, valid_values, name):
+        assert invalid_keys(valid_values | {"NAME": name}) == []
+
+    @pytest.mark.parametrize("name", [
+        pytest.param("", id="empty"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+        pytest.param("../evil", id="parent-dir"),
+        pytest.param("a/b", id="slash"),
+        pytest.param("/etc/passwd", id="absolute"),
+        pytest.param(".hidden", id="hidden-file"),
+        pytest.param("-rf", id="leading-dash"),
+        pytest.param("_x", id="leading-underscore"),
+        pytest.param("my home", id="space"),
+        pytest.param("a@b", id="at-splits-instance"),
+        pytest.param("x" * (config_schema.NAME_MAX_LENGTH + 1),
+                     id="too-long"),
+        pytest.param("d\u00e9j\u00e0", id="non-ascii"),
+    ])
+    def test_invalid(self, valid_values, name):
+        assert invalid_keys(valid_values | {"NAME": name}) == ["NAME"]
+
+    @pytest.mark.parametrize("value", DANGEROUS_IDENTIFIERS)
+    def test_dangerous_identifiers_are_invalid_names(
+        self, valid_values, value
+    ):
+        assert invalid_keys(valid_values | {"NAME": value}) == ["NAME"]

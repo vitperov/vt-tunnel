@@ -24,8 +24,8 @@ def tray(qapp) -> TrayView:
 
 
 @pytest.fixture
-def app(qapp, cfg_path):
-    application = App(cfg_path)
+def app(qapp, config_dir):
+    application = App(config_dir)
     application.controller.show()
     yield application
     application.close()

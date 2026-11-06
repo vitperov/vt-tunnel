@@ -4,16 +4,13 @@ A fake ``ssh`` (a shell script) is put first on PATH, so the real
 subprocess code runs, just against a scripted "server".
 """
 
-import getpass
 import shlex
-import stat
 import time
-from pathlib import Path
 
 import pytest
 
 from conftest import VALID_VALUES, App
-from vt_tunnel_gui.models import ssh_check
+from vt_tunnel_gui.models import ssh_check, ssh_keys
 from vt_tunnel_gui.models.ssh_check import MARKER, Outcome, run_check
 
 USER = VALID_VALUES["REMOTE_USER"]
@@ -22,69 +19,6 @@ EXPECTED_COMMAND = (
     f"ssh -o BatchMode=yes -o ConnectTimeout=10 {USER}@{SERVER} "
     f"'echo {MARKER}'"
 )
-
-
-# What `ssh -G` prints for identity files without IdentityFile in the
-# config (OpenSSH 9; other lines left out).
-DEFAULT_G_OUTPUT = "".join(
-    f"identityfile {name}\n" for name in ssh_check.DEFAULT_IDENTITY_FILES
-)
-
-
-@pytest.fixture
-def home(tmp_path, monkeypatch) -> Path:
-    """A fresh home directory with an empty ~/.ssh (no keys)."""
-    path = tmp_path / "home"
-    (path / ".ssh").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(path))
-    return path
-
-
-@pytest.fixture
-def key(home) -> Path:
-    """A private key at ~/.ssh/id_ed25519."""
-    path = home / ".ssh" / "id_ed25519"
-    path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
-    (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA x\n")
-    return path
-
-
-def _script(path: Path, body: str) -> None:
-    path.write_text(f"#!/bin/bash\n{body}\n")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
-@pytest.fixture
-def fake_ssh(tmp_path, home, monkeypatch):
-    """Install ``ssh`` running the given bash ``body`` for a login; it logs
-    the login's argv (one per line) to the returned file.
-
-    ``ssh -G`` (the key lookup) prints ``g_output`` and exits with
-    ``g_exit``; ``ssh-add -l`` exits with ``agent_exit`` (2: no agent).
-    """
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "ssh-argv"
-    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
-
-    def install(
-        body: str,
-        g_output: str = DEFAULT_G_OUTPUT,
-        g_exit: int = 0,
-        agent_exit: int = 2,
-    ) -> Path:
-        _script(
-            bin_dir / "ssh",
-            'if [ "$1" = -G ]; then\n'
-            f"  printf %s {shlex.quote(g_output)}; exit {g_exit}\n"
-            "fi\n"
-            f"printf '%s\\n' \"$@\" > {shlex.quote(str(log))}\n"
-            f"{body}",
-        )
-        _script(bin_dir / "ssh-add", f"exit {agent_exit}")
-        return log
-
-    return install
 
 
 def server_ok() -> str:
@@ -213,26 +147,6 @@ class TestTimeout:
         assert run_check(USER, SERVER, timeout=5).outcome is Outcome.OK
 
 
-class TestLocalUserNote:
-    def test_same_user(self):
-        assert ssh_check.local_user_note(getpass.getuser()) is None
-
-    def test_empty(self):
-        assert ssh_check.local_user_note("") is None
-
-    def test_other_user(self):
-        note = ssh_check.local_user_note("tunnel-user")
-        assert "tunnel-user" in note
-        assert getpass.getuser() in note
-
-    def test_unknown_current_user(self, monkeypatch):
-        def fail():
-            raise OSError("no user")
-
-        monkeypatch.setattr(ssh_check.getpass, "getuser", fail)
-        assert ssh_check.local_user_note("tunnel-user") is None
-
-
 def commands(result) -> list[str]:
     return [x.command for x in result.suggestions]
 
@@ -240,7 +154,9 @@ def commands(result) -> list[str]:
 COPY_ID = f"ssh-copy-id {USER}@{SERVER}"
 
 
-class TestKeyLookup:
+class TestKeyFirst:
+    """The check looks for a key (ssh_keys) before it tries to log in."""
+
     def test_no_key_skips_the_login(self, fake_ssh):
         log = fake_ssh(server_ok())
         result = ssh_check.check(USER, SERVER)
@@ -252,54 +168,20 @@ class TestKeyLookup:
     def test_no_key_suggests_keygen_then_copy_id(self, fake_ssh):
         fake_ssh(server_ok())
         result = ssh_check.check(USER, SERVER)
-        assert commands(result) == [ssh_check.KEYGEN_COMMAND, COPY_ID]
+        assert commands(result) == [ssh_keys.KEYGEN_COMMAND, COPY_ID]
         assert "passphrase empty" in result.suggestions[0].text
 
-    def test_key_file_found(self, fake_ssh, key):
+    def test_with_a_key_it_logs_in(self, fake_ssh, key):
         log = fake_ssh(server_ok())
         result = ssh_check.check(USER, SERVER)
         assert result.outcome is Outcome.OK
         assert log.exists()
         assert result.suggestions == ()
 
-    def test_public_key_alone_is_no_key(self, fake_ssh, home):
-        (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA\n")
-        fake_ssh(server_ok())
-        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
-
     def test_key_in_agent_is_enough(self, fake_ssh):
         log = fake_ssh(server_ok(), agent_exit=0)
         assert ssh_check.check(USER, SERVER).outcome is Outcome.OK
         assert log.exists()
-
-    @pytest.mark.parametrize("agent_exit", [1, 2])  # no keys / no agent
-    def test_agent_without_keys(self, fake_ssh, agent_exit):
-        fake_ssh(server_ok(), agent_exit=agent_exit)
-        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
-
-    def test_identity_file_from_ssh_config(self, fake_ssh, home):
-        # `IdentityFile ~/.ssh/tunnel` in ~/.ssh/config: ssh -G lists it
-        (home / ".ssh" / "tunnel").write_text("key")
-        fake_ssh(server_ok(), g_output="identityfile ~/.ssh/tunnel\n")
-        keys = ssh_check.find_keys(USER, SERVER)
-        assert keys.files == (home / ".ssh" / "tunnel",)
-
-    def test_only_the_configured_identity_file_counts(self, fake_ssh, key):
-        # IdentityFile set: the default id_ed25519 is not what ssh uses
-        fake_ssh(server_ok(), g_output="identityfile ~/.ssh/tunnel\n")
-        assert ssh_check.check(USER, SERVER).outcome is Outcome.NO_KEY
-
-    def test_tokens_in_identity_file(self, fake_ssh, home):
-        (home / ".ssh" / f"id_{USER}_{SERVER}").write_text("key")
-        fake_ssh(server_ok(), g_output="identityfile %d/.ssh/id_%r_%h\n")
-        assert ssh_check.find_keys(USER, SERVER).files == (
-            home / ".ssh" / f"id_{USER}_{SERVER}",
-        )
-
-    def test_ssh_config_error_falls_back_to_defaults(self, fake_ssh, key):
-        fake_ssh(server_ok(), g_output="", g_exit=255)
-        keys = ssh_check.find_keys(USER, SERVER)
-        assert keys.files == (key,)
 
     def test_ssh_missing_reports_ssh_not_key(self, tmp_path, monkeypatch,
                                              home):
@@ -380,11 +262,11 @@ class TestSuggestions:
 
 
 @pytest.fixture
-def editor(qapp, cfg_path, monkeypatch, key):
+def editor(qapp, config_dir, monkeypatch, key):
     """An App with the editor open on a new connection filled with valid
     values (and the user has a key); check results are recorded instead of
     shown modally."""
-    app = App(cfg_path)
+    app = App(config_dir)
     app.controller.show()
     app.main_view.add_requested.emit()
     app.connection_view.set_values(dict(VALID_VALUES))
@@ -413,10 +295,10 @@ class TestCheckButton:
         [(result, _)] = editor.results
         assert result.outcome is Outcome.OK
 
-    def test_check_does_not_save(self, editor, fake_ssh, cfg_path):
+    def test_check_does_not_save(self, editor, fake_ssh, config_dir):
         fake_ssh(server_ok())
         editor.connection_view.check_button.click()
-        assert not cfg_path.exists()
+        assert list(config_dir.iterdir()) == []
 
     def test_failure_is_reported(self, editor, fake_ssh):
         fake_ssh("echo 'Permission denied (publickey).' >&2; exit 255")

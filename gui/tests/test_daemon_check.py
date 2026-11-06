@@ -291,19 +291,18 @@ class TestParse:
 
 
 class TestOneServiceForAll:
-    """Temporary: one service, running only connection 1, for all."""
+    """Temporary: the old single service stands for every connection."""
 
-    @pytest.mark.parametrize("number", [1, 2, 7])
-    def test_same_service(self, number):
-        assert daemon_check.service_for(number) == SERVICE
+    @pytest.mark.parametrize("name", ["home", "office", "x"])
+    def test_same_service(self, name):
+        assert daemon_check.service_for(name) == SERVICE
 
-    def test_no_note_for_first(self):
-        assert daemon_check.coverage_note(1) is None
-
-    def test_note_for_others(self):
-        note = daemon_check.coverage_note(2)
-        assert "first connection" in note
-        assert "connection 2" in note
+    @pytest.mark.parametrize("name", ["home", "office"])
+    def test_note_for_every_connection(self, name):
+        note = daemon_check.coverage_note(name)
+        assert SERVICE in note
+        assert f"vt-tunnel@{name}.service" in note
+        assert f"\u201c{name}\u201d" in note
 
 
 # --------------------------------------------------------------------------
@@ -453,13 +452,14 @@ class TestMainWindow:
 
 
 @pytest.fixture
-def app(qapp, cfg_path, monkeypatch):
+def app(qapp, config_dir, monkeypatch):
     """An App with two saved connections; daemon results are recorded
     instead of shown modally."""
-    from conftest import cfg_text
+    from conftest import write_conf
 
-    cfg_path.write_text(cfg_text(VALID_VALUES, OTHER))
-    application = App(cfg_path)
+    write_conf(config_dir, VALID_VALUES)
+    write_conf(config_dir, OTHER)
+    application = App(config_dir)
     application.controller.show()
     application.results = []
     monkeypatch.setattr(
@@ -480,7 +480,7 @@ class TestDaemonCheckButton:
         [(result, note)] = app.results
         assert result.status is Status.WORKING
         assert result.service == SERVICE
-        assert note is None
+        assert "\u201chome\u201d" in note
 
     def test_other_connection_checks_same_service_with_note(
         self, app, fake_systemd
@@ -489,7 +489,7 @@ class TestDaemonCheckButton:
         app.main_view.rows[1].check_button.click()
         [(result, note)] = app.results
         assert argv(logs, "systemctl")[1] == SERVICE
-        assert "connection 2" in note
+        assert "\u201coffice\u201d" in note
 
     def test_failure_shown(self, app, fake_systemd):
         fake_systemd(RUNNING | {"ActiveState": "failed",

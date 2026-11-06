@@ -1,7 +1,8 @@
-"""Shared fixtures and test data for the config model tests."""
+"""Shared fixtures and test data."""
 
 import os
-from collections.abc import Callable
+import shlex
+import stat
 from pathlib import Path
 
 # Qt widgets in tests: no display needed. Before any Qt import.
@@ -11,7 +12,9 @@ import pytest  # noqa: E402
 
 from vt_tunnel_gui import config_schema  # noqa: E402
 from vt_tunnel_gui.models.connection import Connection  # noqa: E402
-from vt_tunnel_gui.models.tunnel_config import TunnelConfig  # noqa: E402
+from vt_tunnel_gui.models.connections_dir import (  # noqa: E402
+    ConnectionsDir,
+)
 
 # A complete, valid connection: the examples from config_schema.py, which
 # are also the examples of the table in doc/config.md.
@@ -37,13 +40,19 @@ IDENTIFIER_KEYS = [
 ]
 
 
-def cfg_text(*connections: dict[str, str], start: int = 1) -> str:
-    """Render connections as numbered ``KEY<n>=value`` lines (no comments)."""
+def conf_text(values: dict[str, str]) -> str:
+    """A connection file's ``KEY=value`` lines for ``values`` (NAME, the
+    file name, left out; no comments)."""
     return "".join(
-        f"{key}{number}={value}\n"
-        for number, values in enumerate(connections, start=start)
-        for key, value in values.items()
+        f"{key}={value}\n" for key, value in values.items() if key != "NAME"
     )
+
+
+def write_conf(directory: Path, values: dict[str, str]) -> Path:
+    """Write the file of connection ``values`` into ``directory``."""
+    path = directory / f"{values['NAME']}.conf"
+    path.write_text(conf_text(values), encoding="utf-8")
+    return path
 
 
 @pytest.fixture(scope="session")
@@ -57,7 +66,7 @@ def qapp():
 class App:
     """The composition of app.main(), with quit recorded instead of run."""
 
-    def __init__(self, cfg_path) -> None:
+    def __init__(self, config_dir) -> None:
         from vt_tunnel_gui.controller import Controller
         from vt_tunnel_gui.models.model import Model
         from vt_tunnel_gui.views.connection_view import ConnectionView
@@ -69,7 +78,7 @@ class App:
         self.connection_view = ConnectionView(self.main_view)
         self.tray = TrayView()
         self.controller = Controller(
-            Model(TunnelConfig(cfg_path)),
+            Model(ConnectionsDir(config_dir)),
             self.main_view,
             self.connection_view,
             self.tray,
@@ -101,20 +110,16 @@ def other() -> Connection:
 
 
 @pytest.fixture
-def cfg_path(tmp_path: Path) -> Path:
-    """Path of a config file that doesn't exist yet."""
-    return tmp_path / "vt-tunnel.cfg"
+def config_dir(tmp_path: Path) -> Path:
+    """An empty connections directory."""
+    path = tmp_path / "connections.d"
+    path.mkdir()
+    return path
 
 
 @pytest.fixture
-def make_config(cfg_path: Path) -> Callable[[str], TunnelConfig]:
-    """Write ``text`` to the config file and return a TunnelConfig for it."""
-
-    def make(text: str) -> TunnelConfig:
-        cfg_path.write_text(text, encoding="utf-8")
-        return TunnelConfig(cfg_path)
-
-    return make
+def store(config_dir: Path) -> ConnectionsDir:
+    return ConnectionsDir(config_dir)
 
 
 # --------------------------------------------------------------------------
@@ -202,3 +207,72 @@ DANGEROUS_PORTS = [
 ]
 
 OUT_OF_RANGE_PORTS = ["0", "-1", "65536", "70000", "99999999999999999999"]
+
+
+# --------------------------------------------------------------------------
+# A fake ssh and a private home directory, for the SSH check and key lookup
+# --------------------------------------------------------------------------
+
+from vt_tunnel_gui.models import ssh_keys  # noqa: E402
+
+# What `ssh -G` prints for identity files without IdentityFile in the
+# config (OpenSSH 9; other lines left out).
+DEFAULT_G_OUTPUT = "".join(
+    f"identityfile {name}\n" for name in ssh_keys.DEFAULT_IDENTITY_FILES
+)
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch) -> Path:
+    """A fresh home directory with an empty ~/.ssh (no keys)."""
+    path = tmp_path / "home"
+    (path / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(path))
+    return path
+
+
+@pytest.fixture
+def key(home) -> Path:
+    """A private key at ~/.ssh/id_ed25519."""
+    path = home / ".ssh" / "id_ed25519"
+    path.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    (home / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA x\n")
+    return path
+
+
+def _script(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/bash\n{body}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+@pytest.fixture
+def fake_ssh(tmp_path, home, monkeypatch):
+    """Install ``ssh`` running the given bash ``body`` for a login; it logs
+    the login's argv (one per line) to the returned file.
+
+    ``ssh -G`` (the key lookup) prints ``g_output`` and exits with
+    ``g_exit``; ``ssh-add -l`` exits with ``agent_exit`` (2: no agent).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "ssh-argv"
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+    def install(
+        body: str,
+        g_output: str = DEFAULT_G_OUTPUT,
+        g_exit: int = 0,
+        agent_exit: int = 2,
+    ) -> Path:
+        _script(
+            bin_dir / "ssh",
+            'if [ "$1" = -G ]; then\n'
+            f"  printf %s {shlex.quote(g_output)}; exit {g_exit}\n"
+            "fi\n"
+            f"printf '%s\\n' \"$@\" > {shlex.quote(str(log))}\n"
+            f"{body}",
+        )
+        _script(bin_dir / "ssh-add", f"exit {agent_exit}")
+        return log
+
+    return install

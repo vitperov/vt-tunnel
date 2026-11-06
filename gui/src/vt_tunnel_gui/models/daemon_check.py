@@ -13,9 +13,10 @@ or start the service, and on failure how to test the SSH login.
 The service runs autossh, which keeps running while it retries a failing
 ssh, so the recent log is shown in that case too.
 
-Temporary limitation (daemon rewrite in progress): one service, which
-runs only the first connection, stands for every connection — see
-:func:`service_for` and :func:`coverage_note`.
+Temporary limitation (daemon rewrite in progress): the per-connection
+template ``vt-tunnel@<NAME>.service`` doesn't exist yet, so the old
+single service stands for every connection — see :func:`service_for`
+and :func:`coverage_note`.
 """
 
 import shlex
@@ -26,7 +27,8 @@ from enum import Enum
 
 from vt_tunnel_gui.models.advice import Suggestion
 
-SERVICE = "vt-tunnel.service"
+SERVICE = "vt-tunnel.service"  # the old single service
+TEMPLATE = "vt-tunnel@{name}.service"  # planned: one per connection
 
 SYSTEMCTL = "systemctl"
 JOURNALCTL = "journalctl"
@@ -76,22 +78,23 @@ class DaemonResult:
     suggestions: tuple[Suggestion, ...] = ()
 
 
-def service_for(number: int) -> str:
-    """The systemd service running connection ``number`` (1-based).
+def service_for(name: str) -> str:
+    """The systemd service running connection ``name``.
 
-    Temporary: one service for all connections. Once the daemon runs one
-    instance per connection, this becomes e.g. ``vt-tunnel@{number}``.
+    Temporary: the old single service for all connections. Once the
+    template exists: ``TEMPLATE.format(name=name)``.
     """
     return SERVICE
 
 
-def coverage_note(number: int) -> str | None:
-    """Say so if ``service_for(number)`` doesn't run that connection."""
-    if number == 1:
-        return None
+def coverage_note(name: str) -> str | None:
+    """Say so if ``service_for(name)`` doesn't run connection ``name``."""
     return (
-        f"For now {SERVICE} runs only the first connection in the list: "
-        f"this result is about that connection, not connection {number}."
+        f"For now this checks {SERVICE}, the old single service: it reads "
+        "/etc/systemd/system/vt-tunnel.cfg, not the connection files. The "
+        f"per-connection service ({TEMPLATE.format(name=name)}) doesn't "
+        "exist yet, so this result isn't about connection "
+        f"\u201c{name}\u201d."
     )
 
 
