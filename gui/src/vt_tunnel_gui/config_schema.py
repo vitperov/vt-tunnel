@@ -2,6 +2,9 @@
 
 Describes the keys of ``/etc/systemd/system/vt-tunnel.cfg`` — the
 authoritative source for their types, validation rules and semantics.
+The keys describe ONE connection; in the file, which holds a list of
+connections, each key carries the connection number as a suffix
+(``NAME1``, ``NAME2``, ...).
 The file format and the reasoning behind the rules live in
 ``doc/config.md``; parsing, validation and writing are NOT done here —
 they belong to the config model.
@@ -15,7 +18,9 @@ DEFAULT_CONFIG_PATH = "/etc/systemd/system/vt-tunnel.cfg"
 PORT_MIN = 1
 PORT_MAX = 65535
 
-IDENTIFIER_PATTERN = r"[A-Za-z0-9._-]+"
+# Conservative charset; must not start with "-", or ssh/su would take the
+# value for a command-line option (e.g. REMOTE_USER=-oProxyCommand...).
+IDENTIFIER_PATTERN = r"[A-Za-z0-9._][A-Za-z0-9._-]*"
 
 
 class FieldType(Enum):
@@ -31,6 +36,13 @@ class CfgField:
     description: str
     dead: bool = False
 
+
+NAME = CfgField(
+    key="NAME",
+    type=FieldType.IDENTIFIER,
+    example="home",
+    description="Connection name, shown in the connection list.",
+)
 
 ENABLED = CfgField(
     key="ENABLED",
@@ -64,37 +76,30 @@ REMOTE_SERVER = CfgField(
     description="Server with the external IP and domain name.",
 )
 
-REMOTE_SSH_PORT = CfgField(
-    key="REMOTE_SSH_PORT",
-    type=FieldType.PORT,
-    example="22",
-    description="SSH port on the remote server.",
-)
-
-LOCAL_PORT1 = CfgField(
-    key="LOCAL_PORT1",
+LOCAL_PORT = CfgField(
+    key="LOCAL_PORT",
     type=FieldType.PORT,
     example="22",
     description="Local port to expose.",
 )
 
-REMOTE_PORT1 = CfgField(
-    key="REMOTE_PORT1",
+REMOTE_PORT = CfgField(
+    key="REMOTE_PORT",
     type=FieldType.PORT,
     example="5001",
     description=(
-        "Port bound on the remote server, forwarding back to LOCAL_PORT1."
+        "Port bound on the remote server, forwarding back to LOCAL_PORT."
     ),
 )
 
 FIELDS: tuple[CfgField, ...] = (
+    NAME,
     ENABLED,
     RUN_DAEMON_USER,
     REMOTE_USER,
     REMOTE_SERVER,
-    REMOTE_SSH_PORT,
-    LOCAL_PORT1,
-    REMOTE_PORT1,
+    LOCAL_PORT,
+    REMOTE_PORT,
 )
 
 FIELD_BY_KEY: dict[str, CfgField] = {field.key: field for field in FIELDS}

@@ -7,7 +7,7 @@ Standards-Version: 4.1.2
 Package: NAME
 Section: net
 Architecture: all
-Depends: python3 (>= 3.11), python3-pyqt6, vt-tunnel
+Depends: python3 (>= 3.11), python3-pyqt6, vt-tunnel (>= 1.2.0)
 Description: GUI manager for vt-tunnel settings
  PyQt6 GUI application to view and edit the configuration of the
  vt-tunnel systemd daemon. Ships a stub main window, a desktop

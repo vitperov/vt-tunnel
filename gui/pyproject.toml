@@ -8,7 +8,10 @@ requires-python = ">=3.11"
 vt-tunnel-gui = "vt_tunnel_gui.app:main"
 
 [dependency-groups]
-dev = ["PyQt6"]
+dev = [
+    "PyQt6",
+    "pytest>=9.1.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -16,3 +19,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vt_tunnel_gui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
