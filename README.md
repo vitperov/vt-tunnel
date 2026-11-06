@@ -37,12 +37,12 @@ no third-party tunnel services.
 Download the latest `.deb` from [Releases](https://github.com/vitperov/vt-tunnel/releases), then:
 
 ```bash
-sudo dpkg -i package-vt-tunnel_1.1.2_all.deb
+sudo dpkg -i package-vt-tunnel_1.2.0_all.deb
 ```
 
 This installs:
 - `vt-tunnel.service` — systemd unit
-- `/etc/systemd/vt-tunnel.cfg` — config file
+- `/etc/systemd/system/vt-tunnel.cfg` — config file
 
 ## Quick start
 
@@ -53,21 +53,22 @@ This installs:
    ssh-copy-id user_on_your_server@myserver.com
    ```
 
-1. Edit `/etc/systemd/vt-tunnel.cfg`:
+1. Edit `/etc/systemd/system/vt-tunnel.cfg`:
 
    ```bash
-   RUN_DAEMON_USER=your_local_user
-
-   REMOTE_USER=user_on_your_server
-   REMOTE_SERVER=myserver.com
-   REMOTE_SSH_PORT=22
-
+   # ===== Connection 1: home =====
+   NAME1=home
+   ENABLED1=false
+   RUN_DAEMON_USER1=your_local_user
+   REMOTE_USER1=user_on_your_server
+   REMOTE_SERVER1=myserver.com
    LOCAL_PORT1=22
    REMOTE_PORT1=5001
    ```
 
    With this config, port `22` on this machine shows up as port `5001`
-   on `myserver.com`.
+   on `myserver.com`. (`ENABLED1` is not used yet — the tunnel is
+   switched on by enabling the service, see step 2.)
 
 2. Enable and start the service:
 
@@ -100,16 +101,15 @@ The package lands in `daemon/build/`.
 
 ## Future plans
 
-vt-tunnel is functional but minimal. What's on the roadmap:
+vt-tunnel is functional but minimal. A config GUI already exists — the
+`vt-tunnel-gui` package installs a small desktop app for editing
+`/etc/systemd/system/vt-tunnel.cfg`. What's still on the roadmap:
 
-- **Multiple ports.** Right now the config accepts a single `LOCAL_PORT1` /
-  `REMOTE_PORT1` pair. Planned: any number of pairs (`LOCAL_PORT2`,
-  `REMOTE_PORT2`, ...), so one tunnel can expose SSH alongside a web UI,
-  or a VNC/RDP remote desktop.
-- **Config GUI.** Editing `/etc/systemd/vt-tunnel.cfg` by hand works,
-  but a small desktop app for editing it (and toggling the service)
-  would make setup friendlier — especially on a prototype at a
-  customer's site.
+- **Multiple connections.** The config format supports numbered
+  connections (`NAME1`, `NAME2`, ...), and the GUI can manage them, but
+  the daemon currently tunnels only the first one. Planned: daemon-side
+  support for every configured connection, so one daemon can expose SSH
+  alongside a web UI, or a VNC/RDP remote desktop.
 
 ## License
 
