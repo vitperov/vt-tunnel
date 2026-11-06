@@ -1,4 +1,4 @@
-"""Connection editor window: one input per field, Update/Reset/Delete.
+"""Connection editor window: one input per field, Save/Reset/Delete.
 
 The view is passive: it knows how to show and collect values, but does
 not validate them or decide what the buttons do — it only emits signals
@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -50,7 +52,7 @@ class ConnectionView(QDialog):
     the raw strings as they appear in the cfg file.
     """
 
-    update_requested = pyqtSignal()
+    save_requested = pyqtSignal()
     reset_requested = pyqtSignal()
     delete_requested = pyqtSignal()
 
@@ -68,33 +70,42 @@ class ConnectionView(QDialog):
         for field in config_schema.FIELDS:
             form.addRow(field.key, self._create_input(field))
 
+        # Button order is Delete, Reset ... Save on every platform:
+        # - Save has AcceptRole, which all platform layouts put on the
+        #   right, where OK is expected (the box's accepted() signal is not
+        #   connected, so Save doesn't close the window);
+        # - Delete is kept out of the button box: the box would put a
+        #   DestructiveRole button next to (or right of) Save on some
+        #   platforms. It sits on the far left instead, away from Save.
         buttons = QDialogButtonBox()
-        self.update_button = buttons.addButton(
-            "Update", QDialogButtonBox.ButtonRole.ApplyRole
+        self.save_button = buttons.addButton(
+            "Save", QDialogButtonBox.ButtonRole.AcceptRole
         )
         self.reset_button = buttons.addButton(
             "Reset", QDialogButtonBox.ButtonRole.ResetRole
         )
-        self.delete_button = buttons.addButton(
-            "Delete", QDialogButtonBox.ButtonRole.DestructiveRole
-        )
-        self.update_button.clicked.connect(self.update_requested)
+        self.delete_button = QPushButton("Delete")
+        self.save_button.clicked.connect(self.save_requested)
         self.reset_button.clicked.connect(self.reset_requested)
         self.delete_button.clicked.connect(self.delete_requested)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.delete_button)
+        button_row.addWidget(buttons, stretch=1)
 
         self._status_bar = QStatusBar()
         self._status_bar.setSizeGripEnabled(False)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addLayout(button_row)
         layout.addWidget(self._status_bar)
 
-        # In a dialog, Enter clicks the default button: make that Update,
+        # In a dialog, Enter clicks the default button: make that Save,
         # never Reset (which would silently discard the edits). Must be set
         # once the buttons are inside the dialog, or the dialog doesn't
         # register it and drops it as soon as the button loses focus.
-        self.update_button.setDefault(True)
+        self.save_button.setDefault(True)
         self.reset_button.setAutoDefault(False)
         self.delete_button.setAutoDefault(False)
 

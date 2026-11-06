@@ -23,7 +23,7 @@ class Controller:
             self.on_connection_activated
         )
         self.main_view.add_requested.connect(self.on_add_requested)
-        self.connection_view.update_requested.connect(self.on_update)
+        self.connection_view.save_requested.connect(self.on_save)
         self.connection_view.reset_requested.connect(self.on_reset)
         self.connection_view.delete_requested.connect(self.on_delete)
 
@@ -53,7 +53,7 @@ class Controller:
             self._edit(row, connections[row])
 
     def on_add_requested(self) -> None:
-        """Open the editor for a new, empty connection (saved on Update)."""
+        """Open the editor for a new, empty connection (saved on Save)."""
         if self.connection_view.isVisible():
             self.connection_view.open_editor()
             return
@@ -68,7 +68,7 @@ class Controller:
 
     # ------------------------------------------------------------ actions
 
-    def on_update(self) -> None:
+    def on_save(self) -> None:
         """Save the edited (or new) connection together with the others."""
         connections = self.model.connections()
         edited = Connection(self.connection_view.values())
@@ -81,7 +81,7 @@ class Controller:
         if not self._save(connections):
             return
         self.reload()
-        # A new connection is saved now: further Updates edit it in place.
+        # A new connection is saved now: further Saves edit it in place.
         self._edit(row, self.model.connections()[row])
         self.connection_view.show_status(f"Saved {self.model.config_path}")
 
