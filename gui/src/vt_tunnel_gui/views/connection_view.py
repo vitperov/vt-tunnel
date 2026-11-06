@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.config_schema import CfgField
 from vt_tunnel_gui.models.ssh_check import CheckResult
-from vt_tunnel_gui.views.check_result_view import CheckResultView
+from vt_tunnel_gui.views.check_result_view import ssh_result_view
 
 # Values of the boolean ENABLED key as written in the cfg file.
 BOOL_TRUE = "true"
@@ -225,4 +225,4 @@ class ConnectionView(QDialog):
         self, result: CheckResult, note: str | None = None
     ) -> None:
         """Show a connection check result in a modal window."""
-        CheckResultView(result, note, self).exec()
+        ssh_result_view(result, note, self).exec()

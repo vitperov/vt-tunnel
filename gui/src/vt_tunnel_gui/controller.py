@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 
 from vt_tunnel_gui import config_schema
-from vt_tunnel_gui.models import ssh_check
+from vt_tunnel_gui.models import daemon_check, ssh_check
 from vt_tunnel_gui.models.connection import Connection
 
 # The form fields the connection check uses.
@@ -39,6 +39,7 @@ class Controller:
             self.on_connection_activated
         )
         self.main_view.add_requested.connect(self.on_add_requested)
+        self.main_view.daemon_check_requested.connect(self.on_daemon_check)
         self.main_view.visibility_changed.connect(
             self.on_main_visibility_changed
         )
@@ -192,6 +193,18 @@ class Controller:
             ssh_check.local_user_note(
                 connection[config_schema.RUN_DAEMON_USER.key]
             ),
+        )
+
+    def on_daemon_check(self, row: int) -> None:
+        """Check the systemd service running the connection in ``row``."""
+        number = row + 1  # connections are numbered from 1 in the file
+        self.main_view.set_busy(row, True)
+        try:
+            result = daemon_check.run_check(daemon_check.service_for(number))
+        finally:
+            self.main_view.set_busy(row, False)
+        self.main_view.show_daemon_result(
+            result, daemon_check.coverage_note(number)
         )
 
     def _save(self, connections: Sequence[Connection]) -> bool:

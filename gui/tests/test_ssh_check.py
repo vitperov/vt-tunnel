@@ -302,7 +302,7 @@ class TestCheckButton:
 class TestResultView:
     @pytest.fixture
     def make_view(self, qapp):
-        from vt_tunnel_gui.views.check_result_view import CheckResultView
+        from vt_tunnel_gui.views.check_result_view import ssh_result_view
 
         views = []
 
@@ -310,7 +310,7 @@ class TestResultView:
             result = ssh_check.CheckResult(
                 outcome, "the message", output, EXPECTED_COMMAND
             )
-            view = CheckResultView(result, note)
+            view = ssh_result_view(result, note)
             views.append(view)
             return view
 
