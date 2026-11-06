@@ -6,7 +6,7 @@ In the config file the fields of connection N carry an index suffix
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.config_schema import CfgField, FieldType
@@ -72,10 +72,16 @@ class Connection:
     def name(self) -> str:
         return self._values[config_schema.NAME.key]
 
-    def validate(self) -> list[str]:
-        """Return one error message per invalid field (empty if valid)."""
+    def validate(self, keys: Iterable[str] | None = None) -> list[str]:
+        """Return one error message per invalid field (empty if valid).
+
+        Only the fields named in ``keys`` are checked, if given.
+        """
+        wanted = None if keys is None else set(keys)
         errors = []
         for field in config_schema.FIELDS:
+            if wanted is not None and field.key not in wanted:
+                continue
             error = _field_error(field, self._values[field.key])
             if error:
                 errors.append(error)

@@ -1,60 +1,26 @@
 """Tests of the tray icon and the show/hide/exit wiring in the controller.
 
-Real widgets on Qt's "offscreen" platform: no display needed.
+Real widgets on Qt's "offscreen" platform (see conftest): no display.
 """
 
-import os
+import pytest
+from PyQt6.QtWidgets import QSystemTrayIcon
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import pytest  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
-
-from vt_tunnel_gui.controller import Controller  # noqa: E402
-from vt_tunnel_gui.models.model import Model  # noqa: E402
-from vt_tunnel_gui.models.tunnel_config import TunnelConfig  # noqa: E402
-from vt_tunnel_gui.views import tray_view  # noqa: E402
-from vt_tunnel_gui.views.connection_view import ConnectionView  # noqa: E402
-from vt_tunnel_gui.views.tray_view import TrayView  # noqa: E402
-from vt_tunnel_gui.views.view import MainWindow  # noqa: E402
+from conftest import App
+from vt_tunnel_gui.views import tray_view
+from vt_tunnel_gui.views.tray_view import TrayView
 
 Reason = QSystemTrayIcon.ActivationReason
 
 
-@pytest.fixture(scope="module", autouse=True)
-def qapp() -> QApplication:
-    """Every test here needs one; QPixmap aborts the process without it."""
-    return QApplication.instance() or QApplication([])
+@pytest.fixture(autouse=True)
+def _qapp(qapp):
+    """Every test here needs the QApplication."""
 
 
 @pytest.fixture
 def tray(qapp) -> TrayView:
     return TrayView()
-
-
-class App:
-    """The composition of app.main(), with quit recorded instead of run."""
-
-    def __init__(self, cfg_path) -> None:
-        self.quit_calls = 0
-        self.main_view = MainWindow()
-        self.connection_view = ConnectionView(self.main_view)
-        self.tray = TrayView()
-        self.controller = Controller(
-            Model(TunnelConfig(cfg_path)),
-            self.main_view,
-            self.connection_view,
-            self.tray,
-            self._quit,
-        )
-
-    def _quit(self) -> None:
-        self.quit_calls += 1
-
-    def close(self) -> None:
-        self.tray.hide()
-        self.connection_view.hide()
-        self.main_view.hide()
 
 
 @pytest.fixture

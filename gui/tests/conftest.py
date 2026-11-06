@@ -1,13 +1,17 @@
 """Shared fixtures and test data for the config model tests."""
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 
-import pytest
+# Qt widgets in tests: no display needed. Before any Qt import.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from vt_tunnel_gui import config_schema
-from vt_tunnel_gui.models.connection import Connection
-from vt_tunnel_gui.models.tunnel_config import TunnelConfig
+import pytest  # noqa: E402
+
+from vt_tunnel_gui import config_schema  # noqa: E402
+from vt_tunnel_gui.models.connection import Connection  # noqa: E402
+from vt_tunnel_gui.models.tunnel_config import TunnelConfig  # noqa: E402
 
 # A complete, valid connection: the examples from config_schema.py, which
 # are also the examples of the table in doc/config.md.
@@ -40,6 +44,45 @@ def cfg_text(*connections: dict[str, str], start: int = 1) -> str:
         for number, values in enumerate(connections, start=start)
         for key, value in values.items()
     )
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """The QApplication; widgets (and QPixmap) abort the process without."""
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+class App:
+    """The composition of app.main(), with quit recorded instead of run."""
+
+    def __init__(self, cfg_path) -> None:
+        from vt_tunnel_gui.controller import Controller
+        from vt_tunnel_gui.models.model import Model
+        from vt_tunnel_gui.views.connection_view import ConnectionView
+        from vt_tunnel_gui.views.tray_view import TrayView
+        from vt_tunnel_gui.views.view import MainWindow
+
+        self.quit_calls = 0
+        self.main_view = MainWindow()
+        self.connection_view = ConnectionView(self.main_view)
+        self.tray = TrayView()
+        self.controller = Controller(
+            Model(TunnelConfig(cfg_path)),
+            self.main_view,
+            self.connection_view,
+            self.tray,
+            self._quit,
+        )
+
+    def _quit(self) -> None:
+        self.quit_calls += 1
+
+    def close(self) -> None:
+        self.tray.hide()
+        self.connection_view.hide()
+        self.main_view.hide()
 
 
 @pytest.fixture

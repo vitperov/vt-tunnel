@@ -7,7 +7,8 @@ that the controller handles.
 
 from pathlib import Path
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -24,6 +25,8 @@ from PyQt6.QtWidgets import (
 
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.config_schema import CfgField
+from vt_tunnel_gui.models.ssh_check import CheckResult
+from vt_tunnel_gui.views.check_result_view import CheckResultView
 
 # Values of the boolean ENABLED key as written in the cfg file.
 BOOL_TRUE = "true"
@@ -55,6 +58,7 @@ class ConnectionView(QDialog):
     save_requested = pyqtSignal()
     reset_requested = pyqtSignal()
     delete_requested = pyqtSignal()
+    check_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -76,7 +80,8 @@ class ConnectionView(QDialog):
         #   connected, so Save doesn't close the window);
         # - Delete is kept out of the button box: the box would put a
         #   DestructiveRole button next to (or right of) Save on some
-        #   platforms. It sits on the far left instead, away from Save.
+        #   platforms. It sits on the far left instead, away from Save;
+        # - Check connection sits next to it, for the same reason.
         buttons = QDialogButtonBox()
         self.save_button = buttons.addButton(
             "Save", QDialogButtonBox.ButtonRole.AcceptRole
@@ -85,12 +90,19 @@ class ConnectionView(QDialog):
             "Reset", QDialogButtonBox.ButtonRole.ResetRole
         )
         self.delete_button = QPushButton("Delete")
+        self.check_button = QPushButton("Check connection")
+        self.check_button.setToolTip(
+            "Try to log in to REMOTE_SERVER as REMOTE_USER with your SSH "
+            "key, using the values in the form (saved or not)"
+        )
         self.save_button.clicked.connect(self.save_requested)
         self.reset_button.clicked.connect(self.reset_requested)
         self.delete_button.clicked.connect(self.delete_requested)
+        self.check_button.clicked.connect(self.check_requested)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.delete_button)
+        button_row.addWidget(self.check_button)
         button_row.addWidget(buttons, stretch=1)
 
         self._status_bar = QStatusBar()
@@ -108,6 +120,7 @@ class ConnectionView(QDialog):
         self.save_button.setDefault(True)
         self.reset_button.setAutoDefault(False)
         self.delete_button.setAutoDefault(False)
+        self.check_button.setAutoDefault(False)
 
         self.resize(INITIAL_WIDTH, self.sizeHint().height())
 
@@ -196,3 +209,20 @@ class ConnectionView(QDialog):
 
     def show_status(self, text: str) -> None:
         self._status_bar.showMessage(text, STATUS_TIMEOUT_MS)
+
+    def set_busy(self, busy: bool, text: str = "") -> None:
+        """Show that a blocking task runs (the GUI won't repaint until it
+        ends): wait cursor and ``text`` in the status bar."""
+        if busy:
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self._status_bar.showMessage(text)
+            self._status_bar.repaint()  # now: no event loop until done
+        else:
+            QGuiApplication.restoreOverrideCursor()
+            self._status_bar.clearMessage()
+
+    def show_check_result(
+        self, result: CheckResult, note: str | None = None
+    ) -> None:
+        """Show a connection check result in a modal window."""
+        CheckResultView(result, note, self).exec()

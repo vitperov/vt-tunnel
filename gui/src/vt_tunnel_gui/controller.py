@@ -2,7 +2,12 @@
 
 from collections.abc import Sequence
 
+from vt_tunnel_gui import config_schema
+from vt_tunnel_gui.models import ssh_check
 from vt_tunnel_gui.models.connection import Connection
+
+# The form fields the connection check uses.
+CHECK_KEYS = (config_schema.REMOTE_USER.key, config_schema.REMOTE_SERVER.key)
 
 
 class Controller:
@@ -40,6 +45,7 @@ class Controller:
         self.connection_view.save_requested.connect(self.on_save)
         self.connection_view.reset_requested.connect(self.on_reset)
         self.connection_view.delete_requested.connect(self.on_delete)
+        self.connection_view.check_requested.connect(self.on_check)
         self.tray_view.show_hide_requested.connect(self.on_show_hide_requested)
         self.tray_view.exit_requested.connect(self.on_exit_requested)
 
@@ -156,6 +162,37 @@ class Controller:
         self._editing = None
         self.connection_view.close_editor()
         self.reload()
+
+    def on_check(self) -> None:
+        """Check the SSH login with the values in the form (even unsaved).
+
+        Blocks the GUI for up to ssh_check.CHECK_TIMEOUT_S seconds.
+        """
+        view = self.connection_view
+        connection = Connection(view.values())
+        # The values go to ssh as arguments: never run it with invalid ones
+        # (e.g. a REMOTE_USER starting with "-" would be an ssh option).
+        errors = connection.validate(CHECK_KEYS)
+        if errors:
+            view.show_error("Can't check the connection", "\n".join(errors))
+            return
+        view.set_busy(
+            True,
+            f"Checking connection (up to {ssh_check.CHECK_TIMEOUT_S} s)...",
+        )
+        try:
+            result = ssh_check.run_check(
+                connection[config_schema.REMOTE_USER.key],
+                connection[config_schema.REMOTE_SERVER.key],
+            )
+        finally:
+            view.set_busy(False)
+        view.show_check_result(
+            result,
+            ssh_check.local_user_note(
+                connection[config_schema.RUN_DAEMON_USER.key]
+            ),
+        )
 
     def _save(self, connections: Sequence[Connection]) -> bool:
         """Validate and write; report problems in the editor. True if saved."""
