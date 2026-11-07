@@ -53,14 +53,14 @@ RUN_DAEMON_USER = CfgField(
 REMOTE_USER = CfgField(
     key="REMOTE_USER",
     type=FieldType.IDENTIFIER,
-    example="vasya",
+    example="example_user",
     description="SSH user on the remote server.",
 )
 
 REMOTE_SERVER = CfgField(
     key="REMOTE_SERVER",
     type=FieldType.IDENTIFIER,
-    example="vasya.com",
+    example="example_site.com",
     description="Server with the external IP and domain name.",
 )
 
