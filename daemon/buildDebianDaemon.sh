@@ -4,14 +4,14 @@
 PROJ_NAME=vt-tunnel
 BUILD_DIR=build
 ARCH=all
-SERVICE_NAME=vt-tunnel.service
-SERVICE_CFG=vt-tunnel.cfg
+SERVICE_NAME=vt-tunnel@.service
+EXAMPLE_CONF=example.conf
 INSTALL_DIR=/lib/systemd/system/
-CFG_DIR=/etc/systemd/system/
+CONF_DIR=/etc/vt-tunnel/connections.d/
 CONTROL=control
 CHANGELOG=changelog
 COPYRIGHT=copyright
-VERSION=1.2.0
+VERSION=2.0.0
 ROOT_DIR=`pwd`
 
 PACKAGE_DIR=$ROOT_DIR/$BUILD_DIR/$PROJ_NAME
@@ -26,7 +26,7 @@ rm -rf $PACKAGE_DIR
 
 mkdir -p $PACKAGE_DIR
 mkdir -p $PACKAGE_CTRL_DIR
-mkdir -p $PACKAGE_DIR/$CFG_DIR
+mkdir -p $PACKAGE_DIR/$CONF_DIR
 mkdir -p $PACKAGE_DIR/$INSTALL_DIR
 mkdir -p $PACKAGE_DOC_DIR
 
@@ -35,10 +35,11 @@ cd $PACKAGE_CTRL_DIR/
 sed -i "s/NAME/$PROJ_NAME/g" control
 sed -i "s/VERSION/$VERSION/g" control
 
-cp $ROOT_DIR/$SERVICE_CFG $PACKAGE_DIR/$CFG_DIR
+cp $ROOT_DIR/$EXAMPLE_CONF $PACKAGE_DIR/$CONF_DIR
 cp $ROOT_DIR/$SERVICE_NAME $PACKAGE_DIR/$INSTALL_DIR
 
-chmod 644 $PACKAGE_DIR/$CFG_DIR/$SERVICE_CFG
+chmod 755 $PACKAGE_DIR/$CONF_DIR
+chmod 644 $PACKAGE_DIR/$CONF_DIR/$EXAMPLE_CONF
 chmod 644 $PACKAGE_DIR/$INSTALL_DIR/$SERVICE_NAME
 
 cp $ROOT_DIR/$CHANGELOG $PACKAGE_CTRL_DIR/
@@ -47,7 +48,7 @@ mv $PACKAGE_CTRL_DIR/changelog.gz $PACKAGE_DOC_DIR/changelog.gz
 
 cp $ROOT_DIR/$COPYRIGHT $PACKAGE_DOC_DIR/
 
-echo "${CFG_DIR}${SERVICE_CFG}" > $PACKAGE_CTRL_DIR/conffiles
+echo "${CONF_DIR}${EXAMPLE_CONF}" > $PACKAGE_CTRL_DIR/conffiles
 #echo "sudo systemctl daemon-reload" > $PACKAGE_CTRL_DIR/triggers
 #echo "sudo systemctl start $SERVICE_NAME" >> $PACKAGE_CTRL_DIR/triggers
 
