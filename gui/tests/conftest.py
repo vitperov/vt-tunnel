@@ -9,6 +9,8 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from vt_tunnel_gui import config_schema
+
 
 @pytest.fixture(scope="session")
 def qapp():
@@ -56,3 +58,33 @@ def write_connection_file(connections_dir):
         return path
 
     return write
+
+
+@pytest.fixture
+def valid_values():
+    """A valid value dict holding exactly the schema's example values.
+
+    One entry per schema field, NAME included (write_connection_file
+    leaves NAME out of the file itself); a fresh dict per test, so tests
+    may mutate their copy.
+    """
+    return {field.key: field.example for field in config_schema.FIELDS}
+
+
+@pytest.fixture
+def other_valid_values():
+    """A second valid value dict, every value distinct from valid_values.
+
+    Same keys in schema order, all values valid under the schema's rules,
+    none equal to the corresponding schema example.
+    """
+    return {
+        "NAME": "backup-server",
+        "ENABLED": "true",
+        "RUN_DAEMON_USER": "tunnel",
+        "REMOTE_USER": "deploy",
+        "REMOTE_SERVER": "srv.example.org",
+        "REMOTE_SERVER_SSH_PORT": "2222",
+        "LOCAL_PORT": "8080",
+        "REMOTE_PORT": "9091",
+    }
