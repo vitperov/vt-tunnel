@@ -414,3 +414,242 @@ def test_delete_without_permission_raises(connections_dir):
             ConnectionsDir(connections_dir).delete("home")
     finally:
         connections_dir.chmod(0o755)
+
+
+# ---------------------------------------------------------------------
+# save — write new
+# ---------------------------------------------------------------------
+
+
+def test_write_new(connections_dir, valid_values):
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(valid_values))
+    content = (connections_dir / "home.conf").read_text(encoding="utf-8")
+    assert content == (
+        "# vt-tunnel connection, read by systemd (EnvironmentFile=).\n"
+        "# The connection's name is this file's name.\n"
+        "ENABLED=false\n"
+        "RUN_DAEMON_USER=username\n"
+        "REMOTE_USER=example_user\n"
+        "REMOTE_SERVER=example_site.com\n"
+        "REMOTE_SERVER_SSH_PORT=22\n"
+        "LOCAL_PORT=22\n"
+        "REMOTE_PORT=5001\n"
+    )
+
+
+def test_write_new_round_trip(connections_dir, valid_values):
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(valid_values))
+    assert model.read() == [Connection(valid_values)]
+
+
+def test_write_new_header_has_no_name(connections_dir, valid_values):
+    ConnectionsDir(connections_dir).save(Connection(valid_values))
+    header = (connections_dir / "home.conf").read_text(encoding="utf-8").split("\n")[:2]
+    assert header == [
+        "# vt-tunnel connection, read by systemd (EnvironmentFile=).",
+        "# The connection's name is this file's name.",
+    ]
+    assert "home" not in "\n".join(header)
+
+
+def test_write_new_name_taken(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    before = (connections_dir / "home.conf").read_bytes()
+    values = dict(valid_values, NAME="home")
+    with pytest.raises(ValidationError):
+        ConnectionsDir(connections_dir).save(Connection(values))
+    assert (connections_dir / "home.conf").read_bytes() == before
+
+
+def test_write_new_into_missing_directory_raises(tmp_path, valid_values):
+    with pytest.raises(OSError):
+        ConnectionsDir(tmp_path / "missing").save(Connection(valid_values))
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+def test_write_new_without_permission_raises(tmp_path, valid_values):
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(OSError):
+            ConnectionsDir(parent / "connections.d").save(Connection(valid_values))
+    finally:
+        parent.chmod(0o755)
+
+
+# ---------------------------------------------------------------------
+# save — write existing
+# ---------------------------------------------------------------------
+
+
+def test_write_existing_values_replaced_in_place(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(
+        "# my connection\n"
+        "REMOTE_USER=old_user\n"
+        "\n"
+        "LOCAL_PORT=2222\n",
+        encoding="utf-8",
+    )
+    values = dict(valid_values, REMOTE_USER="new_user", LOCAL_PORT="8080")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    content = (connections_dir / "home.conf").read_text(encoding="utf-8")
+    assert content == (
+        "# my connection\n"
+        "REMOTE_USER=new_user\n"
+        "\n"
+        "LOCAL_PORT=8080\n"
+        "ENABLED=false\n"
+        "RUN_DAEMON_USER=username\n"
+        "REMOTE_SERVER=example_site.com\n"
+        "REMOTE_SERVER_SSH_PORT=22\n"
+        "REMOTE_PORT=5001\n"
+    )
+
+
+def test_write_existing_rewrite_is_idempotent(connections_dir, valid_values):
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(valid_values), saved_name="home")
+    once = (connections_dir / "home.conf").read_bytes()
+    model.save(Connection(valid_values), saved_name="home")
+    assert (connections_dir / "home.conf").read_bytes() == once
+
+
+def test_write_existing_duplicates_collapse_to_last_place(
+    connections_dir, valid_values
+):
+    (connections_dir / "home.conf").write_text(
+        "REMOTE_USER=first\n"
+        "REMOTE_USER=second\n",
+        encoding="utf-8",
+    )
+    values = dict(valid_values, REMOTE_USER="final_user")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    content = (connections_dir / "home.conf").read_text(encoding="utf-8")
+    assert content.count("REMOTE_USER=") == 1
+    assert content == (
+        "REMOTE_USER=final_user\n"
+        "ENABLED=false\n"
+        "RUN_DAEMON_USER=username\n"
+        "REMOTE_SERVER=example_site.com\n"
+        "REMOTE_SERVER_SSH_PORT=22\n"
+        "LOCAL_PORT=22\n"
+        "REMOTE_PORT=5001\n"
+    )
+
+
+def test_write_existing_inline_comment_line_replaced(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(
+        "REMOTE_SERVER=example.com # home\n", encoding="utf-8"
+    )
+    ConnectionsDir(connections_dir).save(Connection(valid_values), saved_name="home")
+    content = (connections_dir / "home.conf").read_text(encoding="utf-8")
+    assert "REMOTE_SERVER=example_site.com\n" in content
+    assert "# home" not in content
+
+
+def test_write_existing_keeps_its_mode(connections_dir, valid_values):
+    path = connections_dir / "home.conf"
+    path.write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    path.chmod(0o600)
+    ConnectionsDir(connections_dir).save(Connection(valid_values), saved_name="home")
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_write_existing_through_symlink_updates_target(
+    connections_dir, tmp_path, valid_values
+):
+    real = tmp_path / "elsewhere.conf"
+    real.write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    link = connections_dir / "home.conf"
+    link.symlink_to(real)
+    values = dict(valid_values, REMOTE_USER="new_user")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    assert link.is_symlink()
+    assert "REMOTE_USER=new_user\n" in real.read_text(encoding="utf-8")
+
+
+def test_write_existing_undecodable_bytes_in_other_lines_survive(
+    connections_dir, valid_values
+):
+    (connections_dir / "home.conf").write_bytes(
+        b"# caf\xe9 note\nREMOTE_USER=old_user\n"
+    )
+    values = dict(valid_values, REMOTE_USER="new_user")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    content = (connections_dir / "home.conf").read_bytes()
+    assert b"# caf\xe9 note\n" in content
+    assert b"REMOTE_USER=new_user\n" in content
+
+
+def test_write_existing_crlf_file_rewritten_with_lf(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_bytes(
+        b"REMOTE_USER=old_user\r\nRUN_DAEMON_USER=tunnel\r\n"
+    )
+    ConnectionsDir(connections_dir).save(Connection(valid_values), saved_name="home")
+    content = (connections_dir / "home.conf").read_bytes()
+    assert b"\r" not in content
+    assert b"REMOTE_USER=example_user\n" in content
+
+
+def test_write_existing_bom_not_duplicated(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_bytes(
+        b"\xef\xbb\xbfREMOTE_USER=old_user\n"
+    )
+    ConnectionsDir(connections_dir).save(Connection(valid_values), saved_name="home")
+    content = (connections_dir / "home.conf").read_bytes()
+    assert not content.startswith(b"\xef\xbb\xbf")
+    assert content.count(b"\xef\xbb\xbf") == 0
+    assert content.startswith(b"REMOTE_USER=example_user\n")
+
+
+def test_write_existing_failed_write_keeps_file_and_removes_temp(
+    connections_dir, valid_values, monkeypatch
+):
+    path = connections_dir / "home.conf"
+    path.write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    before = path.read_bytes()
+
+    def broken_replace(source, destination):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(os, "replace", broken_replace)
+    with pytest.raises(OSError):
+        ConnectionsDir(connections_dir).save(
+            Connection(valid_values), saved_name="home"
+        )
+    monkeypatch.undo()
+    assert path.read_bytes() == before
+    assert [entry.name for entry in connections_dir.iterdir()] == ["home.conf"]
+
+
+def test_write_existing_saved_file_deleted_meanwhile_is_recreated(
+    connections_dir, valid_values
+):
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(valid_values), saved_name="home")
+    (connections_dir / "home.conf").unlink()
+    model.save(Connection(valid_values), saved_name="home")
+    content = (connections_dir / "home.conf").read_text(encoding="utf-8")
+    assert content.startswith("# vt-tunnel connection")
+    assert "REMOTE_USER=example_user\n" in content
+
+
+# ---------------------------------------------------------------------
+# save — doc example
+# ---------------------------------------------------------------------
+
+
+def test_writer_output_is_the_doc_example(connections_dir, valid_values):
+    ConnectionsDir(connections_dir).save(Connection(valid_values))
+    assert (connections_dir / "home.conf").read_text(encoding="utf-8") == (
+        DOC_EXAMPLE_TEXT
+    )
+
+
+def test_doc_example_reads_back(connections_dir, valid_values):
+    ConnectionsDir(connections_dir).save(Connection(valid_values))
+    assert ConnectionsDir(connections_dir).read() == [Connection(valid_values)]

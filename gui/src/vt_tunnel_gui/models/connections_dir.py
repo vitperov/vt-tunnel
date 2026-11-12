@@ -10,6 +10,7 @@ renaming, deletion) lives in this module too.
 
 import logging
 import os
+import tempfile
 
 from vt_tunnel_gui import config_schema
 from vt_tunnel_gui.models.connection import Connection
@@ -91,6 +92,34 @@ class ConnectionsDir:
         ):
             errors.insert(0, f"connection named {name} already exists")
         return errors
+
+    def save(self, connection, saved_name=None):
+        """Validate a connection and write it to its file atomically.
+
+        Validation runs first; any error raises ValidationError and
+        nothing is written. The plain save — no saved_name, or the
+        connection already saved under its own name — writes the file
+        named after the connection, resolving the target through
+        symlinks first so an existing symlink is written through rather
+        than replaced. The old file's text is the base for the rendered
+        output (a missing old file means a fresh file); the write is
+        atomic and preserves the old file's mode and owner.
+        """
+        errors = self.validate(connection, saved_name=saved_name)
+        if errors:
+            raise ValidationError(errors)
+        if saved_name is not None and saved_name != connection.name:
+            # Renaming (write-new + remove-old) is a separate path.
+            raise NotImplementedError(
+                "renaming a connection is not implemented yet"
+            )
+        target = os.path.realpath(self.connection_path(connection.name))
+        old_text = _read_old_text(target)
+        if old_text is None:
+            text = _render_new_file(connection)
+        else:
+            text = _render(old_text, connection)
+        _atomic_write(target, text)
 
     def delete(self, name):
         """Remove one connection's file.
@@ -203,3 +232,148 @@ def _connection_from_text(name, text):
     }
     values[config_schema.NAME.key] = name
     return Connection(values)
+
+
+# The fixed two-line header comment of a brand-new connection file: what
+# the file is, and that the connection's name is this file's name.
+_HEADER_LINES = (
+    "# vt-tunnel connection, read by systemd (EnvironmentFile=).",
+    "# The connection's name is this file's name.",
+)
+
+
+def _read_old_text(path):
+    """The old file's text, or None when there is no old file.
+
+    Read BOM-tolerantly (a leading BOM is stripped) keeping undecodable
+    bytes as surrogates, so untouched lines re-encode to the same bytes
+    they were read from. A missing file means a fresh file.
+    """
+    try:
+        with open(path, encoding="utf-8-sig", errors="surrogateescape") as file:
+            return file.read()
+    except FileNotFoundError:
+        return None
+
+
+def _render_new_file(connection):
+    """The text of a brand-new connection file.
+
+    The fixed two-line header comment, then every file key in schema
+    order, then a trailing newline.
+    """
+    lines = list(_HEADER_LINES)
+    lines.extend(f"{key}={connection[key]}" for key in config_schema.FILE_KEYS)
+    return "\n".join(lines) + "\n"
+
+
+def _render(old_text, connection):
+    """Render the new file text from the old text and a connection.
+
+    Every schema key's last assignment line is replaced in place and
+    its earlier duplicates dropped (the parse is last-wins); keys
+    absent from the file are appended at the end in schema order;
+    every other line — comments, blank lines, unknown keys, a stray
+    NAME line — passes through untouched. The output always ends with
+    exactly one trailing newline; a fully empty result stays empty.
+    """
+    lines = old_text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # the text ended with a newline
+    last_assignment = {}
+    for index, line in enumerate(lines):
+        key = _assignment_key(line)
+        if key is not None:
+            last_assignment[key] = index
+    kept = []
+    for index, line in enumerate(lines):
+        key = _assignment_key(line)
+        if key is not None:
+            if last_assignment[key] != index:
+                continue  # an earlier duplicate of a schema key
+            line = f"{key}={connection[key]}"
+        kept.append(line)
+    for key in config_schema.FILE_KEYS:
+        if key not in last_assignment:
+            kept.append(f"{key}={connection[key]}")
+    if not kept:
+        return ""
+    return "\n".join(kept) + "\n"
+
+
+def _assignment_key(line):
+    """The schema file key a line assigns, or None.
+
+    Mirrors the systemd-style parse: leading whitespace ignored, blank
+    and comment lines ignored, a line without '=' ignored, the key is
+    the text before the first '=' whitespace-stripped. Only schema file
+    keys count — a stray NAME line or an unknown key is not an
+    assignment and passes through untouched.
+    """
+    stripped = line.strip(" \t\r")
+    if not stripped or stripped[0] in "#;":
+        return None
+    key, separator, _ = stripped.partition("=")
+    if not separator:
+        return None
+    key = key.strip(" \t\r")
+    if key in config_schema.FILE_KEYS:
+        return key
+    return None
+
+
+def _atomic_write(path, text):
+    """Write text to path atomically, preserving the old mode and owner.
+
+    The text is written to a hidden dotted temp file in the same
+    directory (an interrupted write leaves something discovery skips)
+    as UTF-8 with the same surrogate escape and LF line endings,
+    flushed and fsynced. Permission bits are copied from the old file,
+    or 0644 for a new file; ownership is copied from the old file's
+    uid/gid when known, with a permission failure silently ignored.
+    The temp file is then atomically renamed over the target, and the
+    directory itself is fsynced last so the rename is durable. On any
+    failure the temp file is removed and the error re-raised; the old
+    file is never truncated in place.
+    """
+    directory = os.path.dirname(path)
+    handle, temp_path = tempfile.mkstemp(
+        dir=directory, prefix=".vt-tunnel-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "wb") as file:
+            file.write(text.encode("utf-8", "surrogateescape"))
+            file.flush()
+            os.fsync(file.fileno())
+        try:
+            old_stat = os.stat(path)
+        except FileNotFoundError:
+            old_stat = None
+        os.chmod(temp_path, old_stat.st_mode & 0o7777 if old_stat else 0o644)
+        if old_stat is not None:
+            try:
+                os.chown(temp_path, old_stat.st_uid, old_stat.st_gid)
+            except PermissionError:
+                pass
+        os.replace(temp_path, path)
+    except BaseException:
+        _remove_quietly(temp_path)
+        raise
+    _fsync_directory(directory)
+
+
+def _remove_quietly(path):
+    """Remove a file, tolerating its already being gone."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _fsync_directory(directory):
+    """Fsync a directory so a rename inside it is durable."""
+    handle = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
