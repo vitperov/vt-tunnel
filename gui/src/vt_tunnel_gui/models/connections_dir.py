@@ -17,6 +17,18 @@ from vt_tunnel_gui.models.connection import Connection
 _log = logging.getLogger(__name__)
 
 
+class ValidationError(Exception):
+    """A connection's values failed validation; nothing was written.
+
+    Carries the list of error messages as ``errors``; the exception text
+    is the messages joined with newlines.
+    """
+
+    def __init__(self, messages):
+        super().__init__("\n".join(messages))
+        self.errors = list(messages)
+
+
 class ConnectionsDir:
     """One directory of per-connection files: discovery, reading, parsing."""
 
@@ -55,6 +67,41 @@ class ConnectionsDir:
         A failed creation (e.g. without permission) propagates.
         """
         os.makedirs(self._directory, exist_ok=True)
+
+    def validate(self, connection, saved_name=None):
+        """Check a connection's values against the schema and the directory.
+
+        Runs the per-connection validation over all fields; every message
+        is collected, never fail-fast. On top of the field errors, a
+        "connection named X already exists" error is prepended when the
+        name itself is well-formed, differs from the name the connection
+        is currently saved under (``saved_name`` is None for a new
+        connection), and a file with that name already exists. A name
+        that is itself invalid is never checked against the files.
+        Returns the message list; empty means the connection can be
+        saved.
+        """
+        errors = connection.validate()
+        name = connection.name
+        name_is_valid = not connection.validate(keys=[config_schema.NAME.key])
+        if (
+            name_is_valid
+            and name != saved_name
+            and os.path.exists(self.connection_path(name))
+        ):
+            errors.insert(0, f"connection named {name} already exists")
+        return errors
+
+    def delete(self, name):
+        """Remove one connection's file.
+
+        A file that is already gone is silently fine; any other OS error
+        (e.g. no permission to remove from the directory) propagates.
+        """
+        try:
+            os.unlink(self.connection_path(name))
+        except FileNotFoundError:
+            pass
 
     def read(self):
         """Discover, read and parse every connection file in the directory.

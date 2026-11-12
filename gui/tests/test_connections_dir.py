@@ -5,7 +5,7 @@ import os
 import pytest
 
 from vt_tunnel_gui.models.connection import Connection
-from vt_tunnel_gui.models.connections_dir import ConnectionsDir
+from vt_tunnel_gui.models.connections_dir import ConnectionsDir, ValidationError
 
 # The packaged example connection (daemon/example.conf): comment lines
 # plus every schema key at its example value.
@@ -304,3 +304,113 @@ def test_quotes_and_backslashes_kept_and_flagged(connections_dir):
     errors = connection.validate()
     assert any(error.startswith("REMOTE_USER:") for error in errors)
     assert any(error.startswith("RUN_DAEMON_USER:") for error in errors)
+
+
+# ---------------------------------------------------------------------
+# validate
+# ---------------------------------------------------------------------
+
+
+def test_validation_error_carries_messages():
+    error = ValidationError(["NAME: bad", "LOCAL_PORT: worse"])
+    assert error.errors == ["NAME: bad", "LOCAL_PORT: worse"]
+    assert str(error) == "NAME: bad\nLOCAL_PORT: worse"
+
+
+def test_validate_valid(connections_dir, valid_values):
+    model = ConnectionsDir(connections_dir)
+    assert model.validate(Connection(valid_values)) == []
+
+
+def test_validate_saving_under_its_own_name(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    model = ConnectionsDir(connections_dir)
+    assert model.validate(Connection(valid_values), saved_name="home") == []
+
+
+def test_validate_new_with_taken_name(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(valid_values), saved_name=None)
+    assert errors == ["connection named home already exists"]
+
+
+def test_validate_invalid_name_not_checked_against_files(
+    connections_dir, valid_values
+):
+    (connections_dir / "a b.conf").write_text("")
+    values = dict(valid_values, NAME="a b")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(values), saved_name=None)
+    assert any(error.startswith("NAME:") for error in errors)
+    assert not any("already exists" in error for error in errors)
+
+
+def test_validate_path_like_name_not_written(connections_dir, valid_values):
+    values = dict(valid_values, NAME="sub/home")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(values), saved_name=None)
+    assert any(error.startswith("NAME:") for error in errors)
+    assert list(connections_dir.iterdir()) == []
+
+
+def test_validate_dangerous_identifier_not_written(connections_dir, valid_values):
+    values = dict(valid_values, RUN_DAEMON_USER="a;b")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(values), saved_name=None)
+    assert any(error.startswith("RUN_DAEMON_USER:") for error in errors)
+    assert not any("already exists" in error for error in errors)
+
+
+def test_validate_dangerous_port_not_written(connections_dir, valid_values):
+    values = dict(valid_values, LOCAL_PORT="22;23")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(values), saved_name=None)
+    assert any(error.startswith("LOCAL_PORT:") for error in errors)
+
+
+def test_validate_hand_edited_injection_read_verbatim_and_flagged(connections_dir):
+    (connections_dir / "home.conf").write_text(
+        'REMOTE_USER="user"\nRUN_DAEMON_USER=a\\b\n', encoding="utf-8"
+    )
+    model = ConnectionsDir(connections_dir)
+    connection = model.read()[0]
+    assert connection["REMOTE_USER"] == '"user"'
+    errors = model.validate(connection, saved_name="home")
+    assert any(error.startswith("REMOTE_USER:") for error in errors)
+    assert any(error.startswith("RUN_DAEMON_USER:") for error in errors)
+
+
+def test_validate_rejected_newline_cannot_add_line(connections_dir, valid_values):
+    values = dict(valid_values, REMOTE_SERVER="evil\nENABLED=true")
+    model = ConnectionsDir(connections_dir)
+    errors = model.validate(Connection(values), saved_name=None)
+    assert any(error.startswith("REMOTE_SERVER:") for error in errors)
+
+
+# ---------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------
+
+
+def test_delete(connections_dir, write_connection_file, valid_values):
+    write_connection_file(valid_values)
+    model = ConnectionsDir(connections_dir)
+    model.delete("home")
+    assert not (connections_dir / "home.conf").exists()
+    assert model.read() == []
+
+
+def test_delete_already_gone(connections_dir):
+    ConnectionsDir(connections_dir).delete("ghost")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+def test_delete_without_permission_raises(connections_dir):
+    (connections_dir / "home.conf").write_text("")
+    connections_dir.chmod(0o555)
+    try:
+        with pytest.raises(OSError):
+            ConnectionsDir(connections_dir).delete("home")
+    finally:
+        connections_dir.chmod(0o755)
