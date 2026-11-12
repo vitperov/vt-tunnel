@@ -88,3 +88,113 @@ def other_valid_values():
         "LOCAL_PORT": "8080",
         "REMOTE_PORT": "9091",
     }
+
+
+@pytest.fixture
+def dangerous_identifiers():
+    """Values an identifier field must never accept: shell metacharacters.
+
+    One string per injection shape — spaces, tabs, dollar forms, command
+    substitution, backticks, semicolons, pipes, redirects, quotes,
+    backslash, globs, braces, tilde, history expansion, subshells, at
+    and colon, path slashes, commas, hashes, line breaks, carriage
+    returns, NUL, Cyrillic homoglyphs of a plain ASCII name, and the
+    empty string (identifiers are required). Every entry must fail
+    validation for RUN_DAEMON_USER, REMOTE_USER and REMOTE_SERVER.
+    """
+    return [
+        "example user",        # space
+        "example\tuser",       # tab
+        "$HOME",
+        "${HOME}",
+        "$(echo example)",     # command substitution
+        "`echo example`",      # backticks
+        "a;b",
+        "a|b",
+        "a>b",
+        "a<b",
+        'a"b',
+        "a'b",
+        "a\\b",
+        "a*b",
+        "a?b",
+        "a[b]",
+        "a{b,c}",
+        "~user",
+        "!!",
+        "!$",
+        "(id)",
+        "a@b",
+        "a:b",
+        "a/b",
+        "a,b",
+        "a#b",
+        "a\nb",
+        "a\rb",
+        "a\x00b",
+        "us\u0435r",           # Cyrillic homoglyph of "user"
+        "",                    # identifiers are required
+    ]
+
+
+@pytest.fixture
+def leading_dash_identifiers():
+    """Values starting with a dash that ssh/su would take for options.
+
+    Real ssh options, su options, the end-of-options marker and a bare
+    dash; every entry must fail identifier validation.
+    """
+    return [
+        "-F.evil",
+        "-oProxyCommand=evil",
+        "-N",
+        "-4",
+        "--",
+        "-",
+    ]
+
+
+@pytest.fixture
+def dangerous_ports():
+    """Port values that must never reach the daemon's command line.
+
+    One string per shape — ssh options after the number, separators,
+    shell substitutions, whitespace variants, signs, decimals,
+    underscores, hex, exponents, non-ASCII digits and plain letters.
+    Every entry must fail port validation.
+    """
+    return [
+        "22 -oProxyCommand=evil",  # options after the number
+        "22,23",
+        "22;23",
+        "22:23",
+        "$PORT",
+        "$(echo 22)",
+        "`echo 22`",
+        " 22",
+        "22 ",
+        "22\t",
+        "\n22",
+        "22\n",
+        "+22",
+        "-22",
+        "22.5",
+        "22.0",
+        "2_2",
+        "22_000",
+        "0x16",
+        "0X16",
+        "2e1",
+        "22e0",
+        "\u0662\u0662",   # Arabic-Indic digits — str.isdigit() accepts them
+        "\uFF12\uFF12",   # fullwidth digits — also isdigit() true
+        "abc",
+        "22a",
+        "a22",
+    ]
+
+
+@pytest.fixture
+def out_of_range_ports():
+    """Well-formed port numbers outside 1-65535."""
+    return ["0", "-1", "65536", "99999999999999999999"]
