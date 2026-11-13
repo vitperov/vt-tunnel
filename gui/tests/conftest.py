@@ -198,3 +198,106 @@ def dangerous_ports():
 def out_of_range_ports():
     """Well-formed port numbers outside 1-65535."""
     return ["0", "-1", "65536", "99999999999999999999"]
+
+
+class FakeSsh:
+    """Handle over the scripted ssh/ssh-add executables of fake_ssh."""
+
+    def __init__(self, state, bin_dir):
+        self._state = state
+        self.bin_dir = bin_dir
+
+    def set_g_output(self, text):
+        """Script the output the fake ssh prints in -G mode."""
+        (self._state / "g-output").write_text(text)
+
+    def set_g_exit(self, code):
+        """Script the fake ssh's exit code in -G mode."""
+        (self._state / "g-exit").write_text(f"{code}\n")
+
+    def set_add_exit(self, code):
+        """Script the fake ssh-add's exit code."""
+        (self._state / "add-exit").write_text(f"{code}\n")
+
+    def set_login_body(self, body):
+        """Script the shell body a fake ssh login runs after logging."""
+        (self._state / "login-body").write_text(body)
+
+    @property
+    def login_argv(self):
+        """The argv (without argv[0]) of the most recent fake ssh run."""
+        return (self._state / "login-argv").read_text().splitlines()
+
+    @property
+    def ssh_path(self):
+        """Path of the fake ssh executable (remove it to hide ssh)."""
+        return self.bin_dir / "ssh"
+
+    @property
+    def ssh_add_path(self):
+        """Path of the fake ssh-add executable (remove it to hide it)."""
+        return self.bin_dir / "ssh-add"
+
+
+_SSH_SCRIPT = """#!/bin/sh
+# Absolute paths for cat: the PATH override holds only the fake bin dir.
+printf '%s\\n' "$@" > "{state}/login-argv"
+for arg in "$@"; do
+    if [ "$arg" = "-G" ]; then
+        /bin/cat "{state}/g-output"
+        exit "$(/bin/cat "{state}/g-exit")"
+    fi
+done
+if [ -f "{state}/login-body" ]; then
+    . "{state}/login-body"
+fi
+"""
+
+_SSH_ADD_SCRIPT = """#!/bin/sh
+exit "$(/bin/cat "{state}/add-exit")"
+"""
+
+
+@pytest.fixture
+def fake_ssh(tmp_path, monkeypatch):
+    """Scripted ssh and ssh-add executables on a PATH override.
+
+    The fake ssh, run with -G, prints the scripted output and exits
+    with the scripted code; run as a login, it runs the scripted body
+    (nothing, exit 0, by default). Every invocation — -G or login —
+    logs its argv (one argument per line, without argv[0]) to a file
+    the handle exposes. The fake ssh-add exits with its scripted code
+    (default 2: no agent). The PATH override holds only the fake bin
+    directory, so no real ssh binary can answer a test, and the real
+    agent socket environment variable is removed, so a developer's own
+    agent never leaks in.
+    """
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    state = tmp_path / "fake-ssh-state"
+    state.mkdir()
+    (state / "g-output").write_text("")
+    (state / "g-exit").write_text("0\n")
+    (state / "add-exit").write_text("2\n")
+    ssh = bin_dir / "ssh"
+    ssh.write_text(_SSH_SCRIPT.format(state=state))
+    ssh.chmod(0o755)
+    ssh_add = bin_dir / "ssh-add"
+    ssh_add.write_text(_SSH_ADD_SCRIPT.format(state=state))
+    ssh_add.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    return FakeSsh(state, bin_dir)
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """A fresh home directory with an empty ~/.ssh, with HOME overridden.
+
+    Every tilde and %d expansion inside a test resolves here, so tests
+    see exactly the home they prepared and never the developer's own.
+    """
+    home = tmp_path / "gui-home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
