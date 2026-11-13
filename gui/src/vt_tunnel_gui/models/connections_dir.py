@@ -104,15 +104,18 @@ class ConnectionsDir:
         than replaced. The old file's text is the base for the rendered
         output (a missing old file means a fresh file); the write is
         atomic and preserves the old file's mode and owner.
+
+        A saved_name different from the connection's name renames
+        instead: the new file is written atomically under the new name
+        — carrying the old file's mode and owner — and only then is the
+        old file removed; a failed write keeps the old file.
         """
         errors = self.validate(connection, saved_name=saved_name)
         if errors:
             raise ValidationError(errors)
         if saved_name is not None and saved_name != connection.name:
-            # Renaming (write-new + remove-old) is a separate path.
-            raise NotImplementedError(
-                "renaming a connection is not implemented yet"
-            )
+            self._rename(connection, saved_name)
+            return
         target = os.path.realpath(self.connection_path(connection.name))
         old_text = _read_old_text(target)
         if old_text is None:
@@ -120,6 +123,28 @@ class ConnectionsDir:
         else:
             text = _render(old_text, connection)
         _atomic_write(target, text)
+
+    def _rename(self, connection, saved_name):
+        """Write the connection to its new file, then remove the old one.
+
+        The old file's full text — comments, unknown keys, formatting —
+        is the base for the rendered new file; the new file is written
+        atomically under the new name carrying the old file's mode and
+        owner, and only then is the old file unlinked. An old name whose
+        file never existed means just a fresh file at the new name; a
+        failed write keeps the old file and removes the temp file.
+        """
+        source = self.connection_path(saved_name)
+        target = self.connection_path(connection.name)
+        old_text = _read_old_text(source)
+        if old_text is None:
+            text = _render_new_file(connection)
+        else:
+            text = _render(old_text, connection)
+        carry_from = source if old_text is not None else None
+        _atomic_write(target, text, carry_from=carry_from)
+        if old_text is not None:
+            _remove_quietly(source)
 
     def delete(self, name):
         """Remove one connection's file.
@@ -322,19 +347,21 @@ def _assignment_key(line):
     return None
 
 
-def _atomic_write(path, text):
+def _atomic_write(path, text, carry_from=None):
     """Write text to path atomically, preserving the old mode and owner.
 
     The text is written to a hidden dotted temp file in the same
     directory (an interrupted write leaves something discovery skips)
     as UTF-8 with the same surrogate escape and LF line endings,
-    flushed and fsynced. Permission bits are copied from the old file,
-    or 0644 for a new file; ownership is copied from the old file's
-    uid/gid when known, with a permission failure silently ignored.
-    The temp file is then atomically renamed over the target, and the
-    directory itself is fsynced last so the rename is durable. On any
-    failure the temp file is removed and the error re-raised; the old
-    file is never truncated in place.
+    flushed and fsynced. Permission bits are copied from the file
+    ``carry_from`` names — the file being replaced, or the old file a
+    rename carries the mode and owner over from — or 0644 for a new
+    file; ownership is copied from that file's uid/gid when known, with
+    a permission failure silently ignored. The temp file is then
+    atomically renamed over the target, and the directory itself is
+    fsynced last so the rename is durable. On any failure the temp file
+    is removed and the error re-raised; the old file is never truncated
+    in place.
     """
     directory = os.path.dirname(path)
     handle, temp_path = tempfile.mkstemp(
@@ -346,7 +373,7 @@ def _atomic_write(path, text):
             file.flush()
             os.fsync(file.fileno())
         try:
-            old_stat = os.stat(path)
+            old_stat = os.stat(carry_from if carry_from is not None else path)
         except FileNotFoundError:
             old_stat = None
         os.chmod(temp_path, old_stat.st_mode & 0o7777 if old_stat else 0o644)

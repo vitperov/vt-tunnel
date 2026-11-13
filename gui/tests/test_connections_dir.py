@@ -653,3 +653,88 @@ def test_writer_output_is_the_doc_example(connections_dir, valid_values):
 def test_doc_example_reads_back(connections_dir, valid_values):
     ConnectionsDir(connections_dir).save(Connection(valid_values))
     assert ConnectionsDir(connections_dir).read() == [Connection(valid_values)]
+
+
+# ---------------------------------------------------------------------
+# save — rename
+# ---------------------------------------------------------------------
+
+
+def test_rename_moves_the_file(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    values = dict(valid_values, NAME="other")
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(values), saved_name="home")
+    assert not (connections_dir / "home.conf").exists()
+    assert (connections_dir / "other.conf").exists()
+    assert model.read() == [Connection(values)]
+
+
+def test_rename_keeps_comments_and_other_keys(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text(
+        "# my connection\n"
+        "MYSTERY=keepme\n"
+        "REMOTE_USER=old_user\n",
+        encoding="utf-8",
+    )
+    values = dict(valid_values, NAME="other", REMOTE_USER="new_user")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    content = (connections_dir / "other.conf").read_text(encoding="utf-8")
+    assert "# my connection\n" in content
+    assert "MYSTERY=keepme\n" in content
+    assert "REMOTE_USER=new_user\n" in content
+    assert "ENABLED=false\n" in content
+    assert "old_user" not in content
+
+
+def test_rename_keeps_the_mode(connections_dir, valid_values):
+    path = connections_dir / "home.conf"
+    path.write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    path.chmod(0o600)
+    values = dict(valid_values, NAME="other")
+    ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    assert ((connections_dir / "other.conf").stat().st_mode & 0o777) == 0o600
+
+
+def test_rename_to_a_taken_name_is_rejected(connections_dir, valid_values):
+    (connections_dir / "home.conf").write_text("REMOTE_USER=home_user\n")
+    (connections_dir / "other.conf").write_text("REMOTE_USER=other_user\n")
+    values = dict(valid_values, NAME="other")
+    with pytest.raises(ValidationError):
+        ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    assert (connections_dir / "home.conf").read_text(
+        encoding="utf-8"
+    ) == "REMOTE_USER=home_user\n"
+    assert (connections_dir / "other.conf").read_text(
+        encoding="utf-8"
+    ) == "REMOTE_USER=other_user\n"
+
+
+def test_rename_old_file_gone_means_fresh_file(connections_dir, valid_values):
+    values = dict(valid_values, NAME="other")
+    model = ConnectionsDir(connections_dir)
+    model.save(Connection(values), saved_name="home")
+    assert not (connections_dir / "home.conf").exists()
+    content = (connections_dir / "other.conf").read_text(encoding="utf-8")
+    assert content.startswith("# vt-tunnel connection")
+    assert "REMOTE_USER=example_user\n" in content
+    assert model.read() == [Connection(values)]
+
+
+def test_rename_failed_write_keeps_the_old_file(
+    connections_dir, valid_values, monkeypatch
+):
+    (connections_dir / "home.conf").write_text(DOC_EXAMPLE_TEXT, encoding="utf-8")
+    before = (connections_dir / "home.conf").read_bytes()
+
+    def broken_replace(source, destination):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(os, "replace", broken_replace)
+    values = dict(valid_values, NAME="other")
+    with pytest.raises(OSError):
+        ConnectionsDir(connections_dir).save(Connection(values), saved_name="home")
+    monkeypatch.undo()
+    assert (connections_dir / "home.conf").read_bytes() == before
+    assert not (connections_dir / "other.conf").exists()
+    assert [entry.name for entry in connections_dir.iterdir()] == ["home.conf"]
