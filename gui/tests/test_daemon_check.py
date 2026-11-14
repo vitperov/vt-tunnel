@@ -782,3 +782,170 @@ class TestFailureSuggestions:
             "sudo systemctl daemon-reload",
         ]
         assert "reinstall" in result.suggestions[0].text
+
+
+# --- The check-result dialog, daemon side ------------------------------
+
+import pytest
+from PyQt6.QtWidgets import QLabel
+
+from vt_tunnel_gui.models.advice import Suggestion
+from vt_tunnel_gui.views import check_result_view
+
+
+def _daemon_result(**overrides):
+    """One daemon check result with the standard fields, overridden."""
+    values = {
+        "status": daemon_check.WORKING,
+        "service": "vt-tunnel@example.service",
+        "message": "vt-tunnel@example.service is running.",
+        "log": "(no log lines)",
+        "command": "systemctl status vt-tunnel@example.service",
+        "suggestions": (),
+    }
+    values.update(overrides)
+    return daemon_check.DaemonCheckResult(**values)
+
+
+def _daemon_dialog(result, note=""):
+    """The result dialog for one daemon result, built but not shown."""
+    presentation = check_result_view.daemon_presentation(result, note)
+    return check_result_view.CheckResultDialog(presentation)
+
+
+class TestDaemonResultDialog:
+    """The result dialog rendering a daemon check result."""
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            daemon_check.UNKNOWN,
+            daemon_check.NOT_INSTALLED,
+            daemon_check.WORKING,
+            daemon_check.NOT_ENABLED,
+            daemon_check.FAILED,
+        ],
+    )
+    def test_verdict_per_status(self, qapp, status):
+        """Every daemon status maps to its own rendered verdict."""
+        result = _daemon_result(
+            status=status,
+            message=f"summary for {status}",
+        )
+
+        dialog = _daemon_dialog(result)
+
+        assert dialog.headline_label.text()
+        assert dialog.message_label.text() == f"summary for {status}"
+
+    def test_verdicts_differ_across_statuses(self, qapp):
+        """No two statuses share a headline."""
+        dialogs = {
+            status: _daemon_dialog(_daemon_result(status=status))
+            for status in [
+                daemon_check.UNKNOWN,
+                daemon_check.NOT_INSTALLED,
+                daemon_check.WORKING,
+                daemon_check.NOT_ENABLED,
+                daemon_check.FAILED,
+            ]
+        }
+        headlines = {
+            status: dialog.headline_label.text()
+            for status, dialog in dialogs.items()
+        }
+
+        assert len(set(headlines.values())) == len(headlines)
+
+    def test_log_label_per_kind(self, qapp):
+        """The daemon log box is labelled as recent output; UNKNOWN as error."""
+        working = _daemon_dialog(_daemon_result(log="some log\n"))
+        unknown = _daemon_dialog(_daemon_result(status=daemon_check.UNKNOWN))
+
+        labels_working = [l.text() for l in working.findChildren(QLabel)]
+        labels_unknown = [l.text() for l in unknown.findChildren(QLabel)]
+        assert "Recent output (last 20 log lines):" in labels_working
+        assert "Error:" in labels_unknown
+
+    def test_log_shown_verbatim(self, qapp):
+        """The journal log reaches the box byte for byte."""
+        log = "Nov 14 10:00:01 host autossh: checking connection\n"
+
+        dialog = _daemon_dialog(_daemon_result(log=log))
+
+        assert dialog.output_box.toPlainText() == log
+
+    def test_log_opens_at_the_newest_lines(self, qapp):
+        """A long log opens scrolled to its bottom (the newest lines)."""
+        log = "\n".join(f"line {index}" for index in range(1, 31)) + "\n"
+
+        dialog = _daemon_dialog(_daemon_result(log=log))
+        dialog.show()
+
+        scrollbar = dialog.output_box.verticalScrollBar()
+        assert scrollbar.maximum() > 0
+        assert scrollbar.value() == scrollbar.maximum()
+        dialog.close()
+
+    def test_output_box_height_is_capped(self, qapp):
+        """A long log's box stops growing at 12 lines and scrolls."""
+        log = "\n".join(f"line {index}" for index in range(1, 31)) + "\n"
+        short = _daemon_dialog(_daemon_result(log="one line\n"))
+        long = _daemon_dialog(_daemon_result(log=log))
+        long.show()
+        long.close()
+
+        assert long.output_box.height() > short.output_box.height()
+        metrics = long.output_box.fontMetrics()
+        assert long.output_box.height() <= (
+            12 * metrics.height() + 2 * long.output_box.frameWidth() + 8
+        )
+
+    def test_wide_log_widens_the_window(self, qapp):
+        """A wide log line stretches the dialog (within the hard cap)."""
+        short = _daemon_dialog(_daemon_result(log="short\n"))
+        wide = _daemon_dialog(_daemon_result(log="x" * 300 + "\n"))
+
+        assert wide.width() > short.width()
+        assert wide.width() <= 900
+
+    def test_suggestions_shown_in_result_window(self, qapp):
+        """A failed check's suggestions render with copyable commands."""
+        result = _daemon_result(
+            status=daemon_check.FAILED,
+            suggestions=(
+                Suggestion(text="Check the ssh login.", command=None),
+                Suggestion(
+                    text="Then start it again:",
+                    command="sudo systemctl restart vt-tunnel@example.service",
+                ),
+            ),
+        )
+
+        dialog = _daemon_dialog(result)
+
+        assert dialog.suggestions_heading.text() == "What you can do:"
+        assert [label.text() for label in dialog.suggestion_labels] == [
+            "Check the ssh login.",
+            "Then start it again:",
+        ]
+        assert len(dialog.command_fields) == 2
+        assert dialog.command_fields[0].edit.text() == (
+            "sudo systemctl restart vt-tunnel@example.service"
+        )
+
+    def test_look_yourself_command_label(self, qapp):
+        """The daemon's look-yourself command is shown under its label."""
+        result = _daemon_result()
+
+        dialog = _daemon_dialog(result)
+
+        assert dialog.check_command_field.edit.text() == result.command
+        labels = [l.text() for l in dialog.findChildren(QLabel)]
+        assert "To look yourself, in a terminal:" in labels
+
+    def test_no_log_placeholder_still_shown(self, qapp):
+        """The placeholder log line is shown like any other output."""
+        dialog = _daemon_dialog(_daemon_result(log="(no log lines)"))
+
+        assert dialog.output_box.toPlainText() == "(no log lines)"
