@@ -949,3 +949,281 @@ class TestDaemonResultDialog:
         dialog = _daemon_dialog(_daemon_result(log="(no log lines)"))
 
         assert dialog.output_box.toPlainText() == "(no log lines)"
+
+
+# --- The main window (connections list) -------------------------------
+
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtWidgets import QApplication
+
+from vt_tunnel_gui.views.view import ConnectionRow, MainWindow
+
+
+def _window(connections=()):
+    """A shown main window holding one row per given value dict."""
+    window = MainWindow()
+    window.set_connections(list(connections))
+    window.show()
+    return window
+
+
+def _click(widget, x=None, y=None):
+    """Send a left press+release to widget at the point (default center)."""
+    if x is None:
+        x = widget.width() // 2
+    if y is None:
+        y = widget.height() // 2
+    point = QPointF(x, y)
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        point,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, press)
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        point,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, release)
+
+
+def _right_click(widget):
+    """Send a right press+release to the widget's center."""
+    point = QPointF(widget.width() // 2, widget.height() // 2)
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        point,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, press)
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        point,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, release)
+
+
+class TestMainWindowRows:
+    """The connections list: one row per connection."""
+
+    def test_one_row_per_connection(self, qapp, valid_values,
+                                    other_valid_values):
+        """Each connection gets its own row, in list order."""
+        window = _window([valid_values, other_valid_values])
+
+        rows = window.findChildren(ConnectionRow)
+        assert len(rows) == 2
+        assert rows[0].name_label.text() == valid_values["NAME"]
+        assert rows[1].name_label.text() == other_valid_values["NAME"]
+
+    def test_summary_line(self, qapp, valid_values, other_valid_values):
+        """The row shows the login and the forwarding as the summary."""
+        window = _window([valid_values, other_valid_values])
+        rows = window.findChildren(ConnectionRow)
+
+        assert rows[0].summary_label.text() == (
+            "example_user@example_site.com · local 22 → remote 5001"
+        )
+        # the ssh port differs from the schema default, so it is shown
+        assert rows[1].summary_label.text() == (
+            "deploy@srv.example.org:2222 · local 8080 → remote 9091"
+        )
+
+    def test_summary_of_an_incomplete_connection(self, qapp):
+        """Missing pieces become question marks in the summary."""
+        values = {"NAME": "partial", "REMOTE_USER": "example_user",
+                  "REMOTE_SERVER": "example_site.com"}
+        window = _window([values])
+        rows = window.findChildren(ConnectionRow)
+
+        assert rows[0].summary_label.text() == (
+            "example_user@example_site.com:? · local ? → remote ?"
+        )
+
+    def test_enabled_indicator_is_display_only(self, qapp):
+        """The checkbox shows ENABLED but ignores mouse events and focus."""
+        on = {"NAME": "on", "ENABLED": "true"}
+        off = {"NAME": "off", "ENABLED": "false"}
+        window = _window([on, off])
+        rows = window.findChildren(ConnectionRow)
+
+        assert rows[0].enabled_checkbox.isChecked()
+        assert not rows[1].enabled_checkbox.isChecked()
+        for row in rows:
+            checkbox = row.enabled_checkbox
+            assert checkbox.focusPolicy() == Qt.FocusPolicy.NoFocus
+            assert checkbox.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+            assert checkbox.toolTip()
+
+    def test_name_is_plain_text(self, qapp):
+        """A name is never interpreted as rich text."""
+        values = {"NAME": "<b>home</b>", "REMOTE_USER": "example_user"}
+        window = _window([values])
+        rows = window.findChildren(ConnectionRow)
+
+        assert rows[0].name_label.textFormat() == Qt.TextFormat.PlainText
+        assert rows[0].name_label.text() == "<b>home</b>"
+
+    def test_unnamed_case(self, qapp):
+        """An empty name renders as "(unnamed)", with no summary line."""
+        values = {"NAME": "", "REMOTE_SERVER_SSH_PORT": "22"}
+        window = _window([values])
+        rows = window.findChildren(ConnectionRow)
+
+        assert rows[0].name_label.text() == "(unnamed)"
+        assert rows[0].summary_label is None
+
+    def test_check_button_emits_its_row(self, qapp, valid_values,
+                                        other_valid_values):
+        """The Check daemon button emits the row's index upward."""
+        window = _window([valid_values, other_valid_values])
+        hits = []
+        window.check_requested.connect(hits.append)
+        rows = window.findChildren(ConnectionRow)
+
+        rows[1].check_button.click()
+
+        assert hits == [1]
+
+    def test_edit_button_emits_its_row(self, qapp, valid_values,
+                                       other_valid_values):
+        """The Edit button emits the row's index upward."""
+        window = _window([valid_values, other_valid_values])
+        hits = []
+        window.edit_requested.connect(hits.append)
+        rows = window.findChildren(ConnectionRow)
+
+        rows[0].edit_button.click()
+
+        assert hits == [0]
+
+    def test_clicking_the_row_text_edits(self, qapp, valid_values):
+        """A left click on the row's name activates the connection."""
+        window = _window([valid_values])
+        hits = []
+        window.edit_requested.connect(hits.append)
+        rows = window.findChildren(ConnectionRow)
+
+        _click(rows[0].name_label)
+
+        assert hits == [0]
+
+    def test_add_button(self, qapp):
+        """The bottom Add connection button emits its request."""
+        window = _window([])
+        hits = []
+        window.add_requested.connect(lambda: hits.append(1))
+
+        window.add_button.click()
+
+        assert hits == [1]
+
+    def test_empty_list(self, qapp):
+        """Without connections the list shows the greyed empty label."""
+        window = _window([])
+
+        assert window.findChildren(ConnectionRow) == []
+        assert window.empty_label.isVisible()
+        assert window.empty_label.text() == "No connections yet."
+        assert not window.empty_label.isEnabled()
+
+    def test_reload_replaces_rows(self, qapp, valid_values,
+                                  other_valid_values):
+        """Every refresh tears the row set down and rebuilds it."""
+        window = _window([valid_values])
+        assert len(window.findChildren(ConnectionRow)) == 1
+
+        window.set_connections([valid_values, other_valid_values])
+        rows = window.findChildren(ConnectionRow)
+        assert len(rows) == 2
+
+        window.set_connections([])
+        assert window.findChildren(ConnectionRow) == []
+        assert window.empty_label.isVisible()
+
+    def test_clicking_the_row_background_edits(self, qapp, valid_values):
+        """A left click on the row's bare background activates it too."""
+        window = _window([valid_values])
+        hits = []
+        window.edit_requested.connect(hits.append)
+        rows = window.findChildren(ConnectionRow)
+
+        # the top contents-margin strip holds no child widget
+        _click(rows[0], x=rows[0].width() // 2, y=2)
+
+        assert hits == [0]
+
+    def test_right_click_does_not_edit(self, qapp, valid_values):
+        """A right-click never activates the connection."""
+        window = _window([valid_values])
+        hits = []
+        window.edit_requested.connect(hits.append)
+        rows = window.findChildren(ConnectionRow)
+
+        _right_click(rows[0])
+        _right_click(rows[0].name_label)
+
+        assert hits == []
+
+    def test_margin_to_the_window_border(self, qapp, valid_values):
+        """The list panel sits 12 px inside the window's borders."""
+        window = _window([valid_values])
+
+        panel = window.list_scroll.geometry()
+        assert panel.x() == 12
+        assert panel.y() == 12
+        assert window.width() - (panel.x() + panel.width()) == 12
+
+    def test_rows_fit_the_list(self, qapp, valid_values,
+                               other_valid_values):
+        """Rows stretch to the panel's full width and fit without scrolling."""
+        window = _window([valid_values, other_valid_values])
+        rows = window.findChildren(ConnectionRow)
+
+        viewport_width = window.list_scroll.viewport().width()
+        for row in rows:
+            assert row.width() == viewport_width
+        assert window.list_scroll.verticalScrollBar().maximum() == 0
+        # top-aligned: the first row starts at the top of the panel
+        assert rows[0].y() == 0
+
+    def test_long_name_is_elided_with_a_tooltip(self, qapp):
+        """A name too wide for its row is elided, tooltip holds the full text."""
+        full_name = "x" * 200
+        values = {"NAME": full_name}
+        window = _window([values])
+        rows = window.findChildren(ConnectionRow)
+        label = rows[0].name_label
+
+        assert label.text() != full_name
+        assert label.text().endswith("…")
+        assert label.toolTip() == full_name
+
+    def test_checking_state_marks_the_row(self, qapp, valid_values):
+        """set_checking swaps the button text and the application cursor."""
+        window = _window([valid_values])
+        rows = window.findChildren(ConnectionRow)
+
+        window.set_checking(0, True)
+        assert rows[0].check_button.text() == "Checking…"
+        assert QApplication.overrideCursor() is not None
+        assert QApplication.overrideCursor().shape() == (
+            Qt.CursorShape.WaitCursor
+        )
+
+        window.set_checking(0, False)
+        assert rows[0].check_button.text() == "Check daemon"
+        assert QApplication.overrideCursor() is None
