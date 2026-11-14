@@ -3,12 +3,13 @@
 Every connection maps to one instance of the ``vt-tunnel@`` template
 unit. The check asks systemd for that instance's state with one
 machine-readable ``systemctl show`` call (no root needed), parses the
-``Key=value`` answer, and reports a frozen result: a status, the
-service name, a summary message, the service log (verbatim, may be
-empty), a command to look yourself, and suggestions. When systemd
-cannot be asked at all — the binary is missing, hangs, exits nonzero,
-or cannot be started — the result is UNKNOWN. The check never raises:
-every command failure becomes part of the result.
+``Key=value`` answer, and — for every unit systemd knows — reads the
+service's recent log with one ``journalctl`` call. It reports a frozen
+result: a status, the service name, a summary message, the service log
+(verbatim, may be empty), a command to look yourself, and suggestions.
+When systemd cannot be asked at all — the binary is missing, hangs,
+exits nonzero, or cannot be started — the result is UNKNOWN. The check
+never raises: every command failure becomes part of the result.
 """
 
 import dataclasses
@@ -26,6 +27,13 @@ UNKNOWN = "unknown"
 NOT_INSTALLED = "not-installed"
 WORKING = "working"
 NOT_ENABLED = "not-enabled"
+FAILED = "failed"
+
+# Shown in place of the log when journalctl printed nothing.
+_NO_LOG_LINES = "(no log lines)"
+
+# The number of recent journal lines the check reads.
+LOG_LINES = 20
 
 # Unit-file states that start the service on boot, or need no enabling.
 ENABLED_STATES = frozenset(
@@ -119,7 +127,10 @@ def check(name, timeout=DEFAULT_TIMEOUT):
         return _unknown(service, log=_joined(proc.stdout, proc.stderr))
 
     properties = parse_properties(proc.stdout)
-    return _decide(properties, service, proc.stdout)
+    if properties.get("LoadState", "") == "not-found":
+        # Nothing to read a log of: systemd knows no such unit.
+        return _not_installed(service)
+    return _decide(properties, service, _read_log(service, timeout))
 
 
 def parse_properties(text):
@@ -139,33 +150,62 @@ def parse_properties(text):
     return properties
 
 
-def _decide(properties, service, output):
+def _read_log(service, timeout):
+    """The service's recent log, or a message about why there is none.
+
+    One ``journalctl`` call for the unit's own entries; both captured
+    streams are joined, so journalctl's own message survives when
+    reading fails (reading the system journal needs membership in the
+    ``adm`` or ``systemd-journal`` group). Empty output becomes the
+    "(no log lines)" placeholder; a command that cannot run becomes a
+    "Can't read the log: <reason>" line.
+    """
+    argv = ["journalctl", "--unit", service, "--lines", str(LOG_LINES), "--no-pager"]
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return "Can't read the log: 'journalctl' was not found."
+    except subprocess.TimeoutExpired:
+        return f"Can't read the log: no answer within {timeout} seconds."
+    except OSError as error:
+        return f"Can't read the log: {error}"
+    return _joined(proc.stdout, proc.stderr) or _NO_LOG_LINES
+
+
+def _decide(properties, service, log):
     """Decide the result from the parsed state properties.
 
-    ``properties`` holds the query's parsed answer; ``output`` is the
-    raw dump, kept for results that must show what was asked.
+    ``properties`` holds the query's parsed answer; ``log`` is the
+    recent service log as read by ``_read_log``. The caller reads the
+    log only for units systemd knows, so every branch here carries it.
     """
     load_state = properties.get("LoadState", "")
     file_state = properties.get("UnitFileState", "")
     active_state = properties.get("ActiveState", "")
 
-    if load_state == "not-found":
-        return _not_installed(service)
     if load_state in MASKED_STATES or file_state in MASKED_STATES:
-        return _masked(service)
+        return _masked(service, log)
     if load_state != "loaded":
-        # A unit that neither loaded nor is covered above is not a
-        # state this check classifies yet.
-        return _unknown(service, log=output)
+        # systemd has the unit but cannot load it: the file is broken.
+        return _broken(properties, service, log)
     if active_state == "active":
-        return _working(properties, service, file_state)
+        return _working(properties, service, file_state, log)
     if active_state == "failed":
-        # A failed process is not a state this check classifies yet.
-        return _unknown(service, log=output)
+        return _failed(properties, service, file_state, log)
     if file_state not in ENABLED_STATES:
         return _not_enabled_not_running(service, file_state)
-    # Enabled but not running is not a state this check classifies yet.
-    return _unknown(service, log=output)
+    if properties.get("SubState", "") == "auto-restart":
+        return _restart_loop(properties, service, log)
+    return _enabled_but_stopped(properties, service, active_state, log)
 
 
 def _result(status, service, message, suggestions, log=""):
@@ -195,7 +235,7 @@ def _not_installed(service):
     )
 
 
-def _masked(service):
+def _masked(service, log):
     """The NOT_ENABLED result for a masked unit."""
     return _result(
         NOT_ENABLED,
@@ -211,10 +251,36 @@ def _masked(service):
             _suggestion("Then enable it, so it starts at boot:", "enable", service),
             _suggestion("Then start it:", "start", service),
         ),
+        log=log,
     )
 
 
-def _working(properties, service, file_state):
+def _broken(properties, service, log):
+    """The FAILED result for a unit systemd cannot load."""
+    detail = properties.get("LoadError", "")
+    if detail and detail != "0":
+        message = f"{service} can't be loaded: {detail}"
+    else:
+        message = f"{service} can't be loaded."
+    return _result(
+        FAILED,
+        service,
+        message,
+        (
+            Suggestion(
+                text=(
+                    "The unit file is broken — reinstall the vt-tunnel "
+                    "package (or fix the file), then make systemd read "
+                    "it again:"
+                ),
+                command="sudo systemctl daemon-reload",
+            ),
+        ),
+        log=log,
+    )
+
+
+def _working(properties, service, file_state, log):
     """The WORKING result: the service's process is running."""
     timestamp = properties.get("ActiveEnterTimestamp", "")
     if timestamp:
@@ -228,7 +294,81 @@ def _working(properties, service, file_state):
         suggestions = (_enable_suggestion(service),)
     else:
         suggestions = ()
-    return _result(WORKING, service, message, suggestions)
+    return _result(WORKING, service, message, suggestions, log=log)
+
+
+def _failed(properties, service, file_state, log):
+    """The FAILED result: the service's process failed."""
+    reason = _failure_reason(properties)
+    message = f"{service} failed ({reason})."
+    suggestions = [_check_ssh_suggestion(), _restart_suggestion(service)]
+    if file_state not in ENABLED_STATES:
+        message += (
+            f" It is not enabled ({file_state}), so it won't start at boot."
+        )
+        suggestions.append(_enable_suggestion(service))
+    return _result(FAILED, service, message, tuple(suggestions), log=log)
+
+
+def _restart_loop(properties, service, log):
+    """The FAILED result for a service systemd keeps restarting."""
+    restarts = properties.get("NRestarts", "0") or "0"
+    return _result(
+        FAILED,
+        service,
+        (
+            f"{service} keeps stopping: systemd will restart it soon "
+            f"(restarts so far: {restarts})."
+        ),
+        # systemd retries by itself — nothing to start.
+        (_check_ssh_suggestion(),),
+        log=log,
+    )
+
+
+def _enabled_but_stopped(properties, service, active_state, log):
+    """The FAILED result for an enabled service that is not running."""
+    sub_state = properties.get("SubState", "")
+    return _result(
+        FAILED,
+        service,
+        f"enabled but not running ({active_state}/{sub_state})",
+        (_suggestion("Start it:", "start", service),),
+        log=log,
+    )
+
+
+def _failure_reason(properties):
+    """The failure reason from the Result property, rendered for people.
+
+    An ``exit-code`` result with a nonzero main status reads as
+    "exit code <N>"; anything else is shown as systemd reported it.
+    """
+    result = properties.get("Result", "")
+    if result == "exit-code":
+        status = properties.get("ExecMainStatus", "")
+        if status and status != "0":
+            return f"exit code {status}"
+    return result
+
+
+def _check_ssh_suggestion():
+    """The check-ssh advice: a failing ssh login is a common cause."""
+    return Suggestion(
+        text=(
+            "The tunnel logs in with an SSH key, without a password — "
+            "a failing login is a common cause. To test it, click "
+            '"Edit" on the connection, then "Check connection".'
+        ),
+    )
+
+
+def _restart_suggestion(service):
+    """The restart suggestion: run the service again once fixed."""
+    return Suggestion(
+        text="Once the cause is fixed, start it again:",
+        command=f"sudo systemctl restart {service}",
+    )
 
 
 def _not_enabled_not_running(service, file_state):

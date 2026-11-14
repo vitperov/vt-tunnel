@@ -55,6 +55,33 @@ class FakeSystemctl:
         """Path of the fake systemctl (remove it to hide systemctl)."""
         return self.bin_dir / "systemctl"
 
+    def set_journal_output(self, text):
+        """Script the journal output the fake journalctl prints."""
+        (self._state / "journal-output").write_text(text)
+
+    def set_journal_exit(self, code):
+        """Script the fake journalctl's exit code."""
+        (self._state / "journal-exit").write_text(f"{code}\n")
+
+    def set_journal_body(self, body):
+        """Script the shell body the fake journalctl runs first."""
+        (self._state / "journal-body").write_text(body)
+
+    @property
+    def journal_argv(self):
+        """The argv (without argv[0]) of the most recent fake journalctl."""
+        return (self._state / "journal-argv").read_text().splitlines()
+
+    @property
+    def journal_ran(self):
+        """Whether the fake journalctl was executed at all."""
+        return (self._state / "journal-argv").exists()
+
+    @property
+    def journalctl_path(self):
+        """Path of the fake journalctl (remove it to hide journalctl)."""
+        return self.bin_dir / "journalctl"
+
 
 _SYSTEMCTL_SCRIPT = """#!/bin/sh
 # Absolute paths for cat: the PATH override holds only the fake bin dir.
@@ -66,15 +93,25 @@ fi
 exit "$(/bin/cat "{state}/show-exit")"
 """
 
+_JOURNALCTL_SCRIPT = """#!/bin/sh
+printf '%s\\n' "$@" > "{state}/journal-argv"
+if [ -f "{state}/journal-body" ]; then
+    . "{state}/journal-body"
+fi
+/bin/cat "{state}/journal-output"
+exit "$(/bin/cat "{state}/journal-exit")"
+"""
+
 
 @pytest.fixture
 def fake_systemd(tmp_path, monkeypatch):
-    """Scripted systemctl executable on a PATH override.
+    """Scripted systemctl and journalctl executables on a PATH override.
 
     The fake systemctl logs its argv, runs the scripted body (nothing,
     by default), prints the scripted property dump and exits with the
-    scripted code (default 0). The PATH override holds only the fake
-    bin directory, so no real systemctl can answer a test.
+    scripted code (default 0). The fake journalctl does the same for
+    the recent-log read. The PATH override holds only the fake bin
+    directory, so no real systemctl or journalctl can answer a test.
     """
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
@@ -82,9 +119,14 @@ def fake_systemd(tmp_path, monkeypatch):
     state.mkdir()
     (state / "show-output").write_text("")
     (state / "show-exit").write_text("0\n")
+    (state / "journal-output").write_text("")
+    (state / "journal-exit").write_text("0\n")
     systemctl = bin_dir / "systemctl"
     systemctl.write_text(_SYSTEMCTL_SCRIPT.format(state=state))
     systemctl.chmod(0o755)
+    journalctl = bin_dir / "journalctl"
+    journalctl.write_text(_JOURNALCTL_SCRIPT.format(state=state))
+    journalctl.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
     return FakeSystemctl(state, bin_dir)
 
@@ -485,3 +527,258 @@ class TestSuggestions:
         assert result.suggestions[0].command == (
             "sudo systemctl enable vt-tunnel@example.service"
         )
+
+
+_JOURNAL_LINES = (
+    "Nov 14 10:00:01 host vt-tunnel@example.service[421]: autossh[421]: "
+    "checking connection",
+    "Nov 14 10:00:05 host vt-tunnel@example.service[421]: ssh exited 255",
+)
+
+
+class TestFailed:
+    """ActiveState failed: the service's process failed."""
+
+    def test_failed_shows_exact_daemon_output(self, fake_systemd):
+        """A failed service is FAILED, with the journal as the log."""
+        fake_systemd.set_show_dump(
+            _dump(
+                ActiveState="failed",
+                SubState="failed",
+                Result="exit-code",
+                ExecMainStatus="1",
+            )
+        )
+        journal = "\n".join(_JOURNAL_LINES) + "\n"
+        fake_systemd.set_journal_output(journal)
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == "vt-tunnel@example.service failed (exit code 1)."
+        assert result.log == journal
+
+    def test_failed_by_signal(self, fake_systemd):
+        """A signal result is shown as systemd reported it."""
+        fake_systemd.set_show_dump(
+            _dump(
+                ActiveState="failed",
+                SubState="failed",
+                Result="signal",
+                ExecMainStatus="9",
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == "vt-tunnel@example.service failed (signal)."
+
+    def test_failed_and_not_enabled_is_failed(self, fake_systemd):
+        """A failed, disabled service stays FAILED, with the hint."""
+        fake_systemd.set_show_dump(
+            _dump(
+                ActiveState="failed",
+                SubState="failed",
+                Result="exit-code",
+                ExecMainStatus="1",
+                UnitFileState="disabled",
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == (
+            "vt-tunnel@example.service failed (exit code 1). "
+            "It is not enabled (disabled), so it won't start at boot."
+        )
+
+    def test_restart_loop(self, fake_systemd):
+        """An enabled service in auto-restart is a restart loop."""
+        fake_systemd.set_show_dump(
+            _dump(
+                ActiveState="activating",
+                SubState="auto-restart",
+                Result="exit-code",
+                ExecMainStatus="1",
+                NRestarts="3",
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == (
+            "vt-tunnel@example.service keeps stopping: systemd will "
+            "restart it soon (restarts so far: 3)."
+        )
+
+    def test_enabled_but_stopped(self, fake_systemd):
+        """An enabled, inactive service is FAILED, not NOT_ENABLED."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="inactive", SubState="dead")
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == "enabled but not running (inactive/dead)"
+
+    def test_bad_unit_file(self, fake_systemd):
+        """A unit that does not load is FAILED, with the LoadError."""
+        fake_systemd.set_show_dump(
+            _dump(
+                LoadState="error",
+                LoadError=(
+                    "org.freedesktop.systemd1.LoadFailed Unit "
+                    "vt-tunnel@example.service is not properly formatted."
+                ),
+                ActiveState="inactive",
+                SubState="failed",
+                UnitFileState="enabled",
+                Result="",
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.FAILED
+        assert result.message == (
+            "vt-tunnel@example.service can't be loaded: "
+            "org.freedesktop.systemd1.LoadFailed Unit "
+            "vt-tunnel@example.service is not properly formatted."
+        )
+
+
+class TestLog:
+    """The recent-log read for every unit systemd knows."""
+
+    def test_journal_arguments(self, fake_systemd):
+        """One journalctl call with the unit, 20 lines, no pager."""
+        fake_systemd.set_show_dump(_dump())
+
+        daemon_check.check("example")
+
+        assert fake_systemd.journal_argv == [
+            "--unit",
+            "vt-tunnel@example.service",
+            "--lines",
+            "20",
+            "--no-pager",
+        ]
+
+    def test_no_permission_hint_is_shown(self, fake_systemd):
+        """journalctl's own message survives a failed read."""
+        fake_systemd.set_show_dump(_dump())
+        fake_systemd.set_journal_exit(1)
+        fake_systemd.set_journal_body(
+            'echo "Hint: You are currently not seeing messages from '
+            'other users and the system" >&2\n'
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.log == (
+            "Hint: You are currently not seeing messages from other "
+            "users and the system\n"
+        )
+
+    def test_empty_log(self, fake_systemd):
+        """No journal output becomes the placeholder line."""
+        fake_systemd.set_show_dump(_dump())
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.log == "(no log lines)"
+
+    def test_journalctl_missing(self, fake_systemd):
+        """A missing journalctl is reported, not raised."""
+        fake_systemd.set_show_dump(_dump())
+        fake_systemd.journalctl_path.unlink()
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.log == "Can't read the log: 'journalctl' was not found."
+
+    def test_not_installed_reads_no_log(self, fake_systemd):
+        """A not-found unit skips the journal read entirely."""
+        fake_systemd.set_show_dump(_dump(LoadState="not-found"))
+
+        daemon_check.check("example")
+
+        assert not fake_systemd.journal_ran
+
+
+class TestFailureSuggestions:
+    """Each FAILED branch carries its own suggestions."""
+
+    def test_failed_points_to_ssh_check_then_restart(self, fake_systemd):
+        """A failed service: check the ssh login, then restart."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="failed", SubState="failed", Result="exit-code",
+                  ExecMainStatus="1")
+        )
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            None,
+            "sudo systemctl restart vt-tunnel@example.service",
+        ]
+        assert "Check connection" in result.suggestions[0].text
+        assert "Edit" in result.suggestions[0].text
+        assert "Once the cause is fixed" in result.suggestions[1].text
+
+    def test_failed_and_not_enabled_also_suggests_enable(self, fake_systemd):
+        """A failed, disabled service adds the enable suggestion."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="failed", SubState="failed", Result="exit-code",
+                  ExecMainStatus="1", UnitFileState="disabled")
+        )
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            None,
+            "sudo systemctl restart vt-tunnel@example.service",
+            "sudo systemctl enable vt-tunnel@example.service",
+        ]
+
+    def test_restart_loop_points_to_ssh_check_only(self, fake_systemd):
+        """A restart loop: only the ssh advice — nothing to start."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="activating", SubState="auto-restart")
+        )
+
+        result = daemon_check.check("example")
+
+        assert len(result.suggestions) == 1
+        assert result.suggestions[0].command is None
+        assert "Check connection" in result.suggestions[0].text
+
+    def test_enabled_but_stopped_suggests_start(self, fake_systemd):
+        """An enabled, stopped service suggests starting it."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="inactive", SubState="dead")
+        )
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            "sudo systemctl start vt-tunnel@example.service",
+        ]
+
+    def test_bad_unit_file_suggests_daemon_reload(self, fake_systemd):
+        """A broken unit file: reinstall, then daemon-reload."""
+        fake_systemd.set_show_dump(_dump(LoadState="error"))
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            "sudo systemctl daemon-reload",
+        ]
+        assert "reinstall" in result.suggestions[0].text
