@@ -272,3 +272,216 @@ class TestResultRecord:
             "suggestions",
         ]
         assert result.service == "vt-tunnel@example.service"
+
+
+def _dump(**overrides):
+    """A property dump of a loaded, running, enabled instance, overridden."""
+    properties = {
+        "LoadState": "loaded",
+        "LoadError": "0",
+        "ActiveState": "active",
+        "SubState": "running",
+        "UnitFileState": "enabled",
+        "Result": "success",
+        "ExecMainStatus": "0",
+        "NRestarts": "0",
+        "ActiveEnterTimestamp": "Tue 2026-01-13 10:00:00 UTC",
+    }
+    properties.update(overrides)
+    return "".join(f"{key}={value}\n" for key, value in properties.items())
+
+
+class TestNotInstalled:
+    """LoadState not-found: systemd knows no such unit."""
+
+    def test_state(self, fake_systemd):
+        """A not-found unit is reported as not installed."""
+        fake_systemd.set_show_dump(
+            _dump(
+                LoadState="not-found",
+                ActiveState="inactive",
+                SubState="dead",
+                UnitFileState="",
+                Result="",
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.NOT_INSTALLED
+        assert result.message == (
+            "vt-tunnel@example.service is not installed. "
+            "Install the vt-tunnel package."
+        )
+
+    def test_no_suggestions(self, fake_systemd):
+        """Not-installed carries no suggestions."""
+        fake_systemd.set_show_dump(_dump(LoadState="not-found"))
+
+        result = daemon_check.check("example")
+
+        assert result.suggestions == ()
+
+
+class TestWorking:
+    """ActiveState active: the service is running."""
+
+    def test_running_since(self, fake_systemd):
+        """A running, enabled service is working, with the timestamp."""
+        fake_systemd.set_show_dump(_dump())
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.message == (
+            "vt-tunnel@example.service is running since "
+            "Tue 2026-01-13 10:00:00 UTC."
+        )
+
+    def test_without_timestamp(self, fake_systemd):
+        """No timestamp: the message ends with a plain period."""
+        fake_systemd.set_show_dump(_dump(ActiveEnterTimestamp=""))
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.message == "vt-tunnel@example.service is running."
+
+    def test_not_enabled_hint(self, fake_systemd):
+        """A running but disabled service gains the not-enabled hint."""
+        fake_systemd.set_show_dump(_dump(UnitFileState="disabled"))
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert result.message == (
+            "vt-tunnel@example.service is running since "
+            "Tue 2026-01-13 10:00:00 UTC. It is not enabled (disabled), "
+            "so it won't start at boot."
+        )
+
+    @pytest.mark.parametrize(
+        "file_state",
+        [
+            "enabled",
+            "enabled-runtime",
+            "static",
+            "alias",
+            "generated",
+            "transient",
+        ],
+    )
+    def test_enabled_state_set(self, fake_systemd, file_state):
+        """Every boot-starting file state counts as enabled: no hint."""
+        fake_systemd.set_show_dump(_dump(UnitFileState=file_state))
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.WORKING
+        assert "not enabled" not in result.message
+        assert result.suggestions == ()
+
+
+class TestNotEnabled:
+    """Installed, but not enabled and not running."""
+
+    @pytest.mark.parametrize("file_state", ["disabled", "linked", "indirect"])
+    def test_not_running_across_file_states(self, fake_systemd, file_state):
+        """Any non-boot-starting file state: installed but not enabled."""
+        fake_systemd.set_show_dump(
+            _dump(
+                ActiveState="inactive",
+                SubState="dead",
+                UnitFileState=file_state,
+            )
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.NOT_ENABLED
+        assert result.message == (
+            f"installed, but not enabled ({file_state}) and not running"
+        )
+
+    def test_suggestions(self, fake_systemd):
+        """Not enabled and not running: enable, then start."""
+        fake_systemd.set_show_dump(
+            _dump(ActiveState="inactive", SubState="dead", UnitFileState="disabled")
+        )
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            "sudo systemctl enable vt-tunnel@example.service",
+            "sudo systemctl start vt-tunnel@example.service",
+        ]
+
+
+class TestMasked:
+    """A masked unit cannot be started or enabled."""
+
+    @pytest.mark.parametrize("masked_state", ["masked", "masked-runtime"])
+    def test_load_state_masked(self, fake_systemd, masked_state):
+        """A masked load state is not-enabled with the masked message."""
+        fake_systemd.set_show_dump(
+            _dump(LoadState=masked_state, ActiveState="inactive", SubState="dead")
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.NOT_ENABLED
+        assert result.message == (
+            "vt-tunnel@example.service is masked: it can't be started "
+            "or enabled until it is unmasked."
+        )
+
+    @pytest.mark.parametrize("masked_state", ["masked", "masked-runtime"])
+    def test_file_state_masked(self, fake_systemd, masked_state):
+        """A masked unit-file state is not-enabled too."""
+        fake_systemd.set_show_dump(
+            _dump(UnitFileState=masked_state, ActiveState="inactive", SubState="dead")
+        )
+
+        result = daemon_check.check("example")
+
+        assert result.status == daemon_check.NOT_ENABLED
+        assert result.message == (
+            "vt-tunnel@example.service is masked: it can't be started "
+            "or enabled until it is unmasked."
+        )
+
+    def test_suggestions(self, fake_systemd):
+        """A masked unit: unmask, then enable, then start."""
+        fake_systemd.set_show_dump(_dump(LoadState="masked"))
+
+        result = daemon_check.check("example")
+
+        assert [s.command for s in result.suggestions] == [
+            "sudo systemctl unmask vt-tunnel@example.service",
+            "sudo systemctl enable vt-tunnel@example.service",
+            "sudo systemctl start vt-tunnel@example.service",
+        ]
+
+
+class TestSuggestions:
+    """Each implemented branch carries its own suggestions."""
+
+    def test_working_and_enabled_needs_nothing(self, fake_systemd):
+        """A running, enabled service needs no advice."""
+        fake_systemd.set_show_dump(_dump())
+
+        result = daemon_check.check("example")
+
+        assert result.suggestions == ()
+
+    def test_working_but_not_enabled(self, fake_systemd):
+        """A running but disabled service suggests enabling it."""
+        fake_systemd.set_show_dump(_dump(UnitFileState="disabled"))
+
+        result = daemon_check.check("example")
+
+        assert len(result.suggestions) == 1
+        assert "Enable" in result.suggestions[0].text
+        assert result.suggestions[0].command == (
+            "sudo systemctl enable vt-tunnel@example.service"
+        )

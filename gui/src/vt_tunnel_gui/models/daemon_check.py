@@ -14,11 +14,26 @@ every command failure becomes part of the result.
 import dataclasses
 import subprocess
 
+from vt_tunnel_gui.models.advice import Suggestion
+
 # Each command is given this long to answer by default.
 DEFAULT_TIMEOUT = 5
 
 # Status of a check that could not ask systemd at all.
 UNKNOWN = "unknown"
+
+# Statuses of a check that asked systemd and recognized the state.
+NOT_INSTALLED = "not-installed"
+WORKING = "working"
+NOT_ENABLED = "not-enabled"
+
+# Unit-file states that start the service on boot, or need no enabling.
+ENABLED_STATES = frozenset(
+    {"enabled", "enabled-runtime", "static", "alias", "generated", "transient"}
+)
+
+# Load and unit-file states that mean the unit is masked.
+MASKED_STATES = frozenset({"masked", "masked-runtime"})
 
 # The exact properties the state query asks for, in this order.
 QUERY_PROPERTIES = (
@@ -130,21 +145,116 @@ def _decide(properties, service, output):
     ``properties`` holds the query's parsed answer; ``output`` is the
     raw dump, kept for results that must show what was asked.
     """
-    # No branch classifies a parsed answer yet: report it as unknown
-    # rather than guess a state.
+    load_state = properties.get("LoadState", "")
+    file_state = properties.get("UnitFileState", "")
+    active_state = properties.get("ActiveState", "")
+
+    if load_state == "not-found":
+        return _not_installed(service)
+    if load_state in MASKED_STATES or file_state in MASKED_STATES:
+        return _masked(service)
+    if load_state != "loaded":
+        # A unit that neither loaded nor is covered above is not a
+        # state this check classifies yet.
+        return _unknown(service, log=output)
+    if active_state == "active":
+        return _working(properties, service, file_state)
+    if active_state == "failed":
+        # A failed process is not a state this check classifies yet.
+        return _unknown(service, log=output)
+    if file_state not in ENABLED_STATES:
+        return _not_enabled_not_running(service, file_state)
+    # Enabled but not running is not a state this check classifies yet.
     return _unknown(service, log=output)
 
 
-def _unknown(service, message="Can't ask systemd", log=""):
-    """The UNKNOWN result: the check itself could not ask systemd."""
+def _result(status, service, message, suggestions, log=""):
+    """One decided result with the standard look-yourself command."""
     return DaemonCheckResult(
-        status=UNKNOWN,
+        status=status,
         service=service,
         message=message,
         log=log,
         command=f"systemctl status {service}",
-        suggestions=(),
+        suggestions=suggestions,
     )
+
+
+def _unknown(service, message="Can't ask systemd", log=""):
+    """The UNKNOWN result: the check itself could not ask systemd."""
+    return _result(UNKNOWN, service, message, (), log=log)
+
+
+def _not_installed(service):
+    """The NOT_INSTALLED result: systemd knows no such unit."""
+    return _result(
+        NOT_INSTALLED,
+        service,
+        f"{service} is not installed. Install the vt-tunnel package.",
+        (),
+    )
+
+
+def _masked(service):
+    """The NOT_ENABLED result for a masked unit."""
+    return _result(
+        NOT_ENABLED,
+        service,
+        (
+            f"{service} is masked: it can't be started or enabled "
+            "until it is unmasked."
+        ),
+        (
+            _suggestion(
+                "Unmask it, so it can be enabled and started:", "unmask", service
+            ),
+            _suggestion("Then enable it, so it starts at boot:", "enable", service),
+            _suggestion("Then start it:", "start", service),
+        ),
+    )
+
+
+def _working(properties, service, file_state):
+    """The WORKING result: the service's process is running."""
+    timestamp = properties.get("ActiveEnterTimestamp", "")
+    if timestamp:
+        message = f"{service} is running since {timestamp}."
+    else:
+        message = f"{service} is running."
+    if file_state not in ENABLED_STATES:
+        message += (
+            f" It is not enabled ({file_state}), so it won't start at boot."
+        )
+        suggestions = (_enable_suggestion(service),)
+    else:
+        suggestions = ()
+    return _result(WORKING, service, message, suggestions)
+
+
+def _not_enabled_not_running(service, file_state):
+    """The NOT_ENABLED result: installed, but not enabled and not running."""
+    return _result(
+        NOT_ENABLED,
+        service,
+        f"installed, but not enabled ({file_state}) and not running",
+        (
+            _enable_suggestion(service),
+            _suggestion("Then start it:", "start", service),
+        ),
+    )
+
+
+def _enable_suggestion(service):
+    """The enable suggestion: make the service start at boot."""
+    return Suggestion(
+        text="Enable it, so it starts at boot:",
+        command=f"sudo systemctl enable {service}",
+    )
+
+
+def _suggestion(text, verb, service):
+    """One systemctl suggestion: advice text plus the pasteable command."""
+    return Suggestion(text=text, command=f"sudo systemctl {verb} {service}")
 
 
 def _joined(stdout, stderr):
