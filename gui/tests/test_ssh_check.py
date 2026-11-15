@@ -689,3 +689,200 @@ class TestSshResultDialog:
         assert long.width() > short.width()
         assert long.width() <= 900
         assert long.command_fields[0].edit.text() == long_command
+
+
+# --- The editor's Check connection button --------------------------------
+
+import os
+import pwd
+
+
+class TestEditorSshCheck:
+    """The editor's check button runs the login check on the form."""
+
+    def test_the_button_runs_the_check_with_the_form_values(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+    ):
+        """The check ssh-es the user, server and port the form holds."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        composition.editor.set_values(
+            dict(
+                valid_values,
+                REMOTE_USER="formuser",
+                REMOTE_SERVER="form.example.org",
+                REMOTE_SERVER_SSH_PORT="2222",
+            )
+        )
+
+        composition.editor.check_requested.emit()
+
+        assert "formuser@form.example.org" in fake_ssh.login_argv
+        assert "-p" in fake_ssh.login_argv
+        assert "2222" in fake_ssh.login_argv
+        kind, result, note = composition.shown[0]
+        assert kind == "ssh"
+        assert result.outcome == ssh_check.OK
+
+    def test_the_check_does_not_save(
+        self, recording_composition, fake_ssh, fake_home,
+        write_connection_file, valid_values,
+    ):
+        """Checking uses the form's current values but writes nothing."""
+        path = write_connection_file(valid_values)
+        before = path.read_text(encoding="utf-8")
+        composition = recording_composition
+        composition.controller.reload()
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        composition.window.edit_requested.emit(0)
+        composition.editor.field_edits["LOCAL_PORT"].setText("9999")
+
+        composition.editor.check_requested.emit()
+
+        assert path.read_text(encoding="utf-8") == before
+        assert [p.name for p in composition.directory.iterdir()] == [
+            f"{valid_values['NAME']}.conf"
+        ]
+
+    def test_a_failure_is_reported(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+    ):
+        """A failed login reaches the result dialog as a failure."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(
+            "echo 'user@srv: Permission denied' >&2; exit 255"
+        )
+        composition.editor.set_values(valid_values)
+
+        composition.editor.check_requested.emit()
+
+        kind, result, note = composition.shown[0]
+        assert kind == "ssh"
+        assert result.outcome == ssh_check.FAILED
+        assert "Permission denied" in result.output
+
+    def test_invalid_values_never_reach_ssh(
+        self, recording_composition, fake_ssh, fake_home, tmp_path,
+        valid_values, controller_boxes,
+    ):
+        """A dash-leading remote user is refused before any ssh runs."""
+        composition = recording_composition
+        sentinel = tmp_path / "login-ran"
+        fake_ssh.set_login_body(f"touch {sentinel}")
+        composition.editor.set_values(
+            dict(valid_values, REMOTE_USER="-oProxyCommand=evil")
+        )
+
+        composition.editor.check_requested.emit()
+
+        assert len(controller_boxes.criticals) == 1
+        title, text = controller_boxes.criticals[0]
+        assert title == "Can't check the connection"
+        assert "REMOTE_USER" in text
+        assert composition.shown == []
+        assert not sentinel.exists()
+
+    def test_other_invalid_fields_do_not_block_the_check(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+    ):
+        """Only the three ssh fields gate the check; the rest may be off."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        composition.editor.set_values(
+            dict(valid_values, NAME="", LOCAL_PORT="abc")
+        )
+
+        composition.editor.check_requested.emit()
+
+        kind, result, note = composition.shown[0]
+        assert result.outcome == ssh_check.OK
+
+    def test_the_note_when_the_tunnel_runs_as_another_user(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+    ):
+        """A daemon-run user other than the GUI user adds the mismatch note."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        composition.editor.set_values(
+            dict(valid_values, RUN_DAEMON_USER="someone_else")
+        )
+
+        composition.editor.check_requested.emit()
+
+        kind, result, note = composition.shown[0]
+        assert "someone_else" in note
+
+    def test_no_note_when_the_tunnel_runs_as_this_user(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+    ):
+        """The daemon-run user matching the GUI user adds no note."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        current = pwd.getpwuid(os.getuid()).pw_name
+        composition.editor.set_values(
+            dict(valid_values, RUN_DAEMON_USER=current)
+        )
+
+        composition.editor.check_requested.emit()
+
+        kind, result, note = composition.shown[0]
+        assert not note
+
+    def test_no_key_is_reported_without_a_login(
+        self, recording_composition, fake_ssh, fake_home, tmp_path,
+        valid_values,
+    ):
+        """With no key anywhere, the result says so and ssh never logs in."""
+        composition = recording_composition
+        sentinel = tmp_path / "login-ran"
+        fake_ssh.set_login_body(f"touch {sentinel}")
+        composition.editor.set_values(valid_values)
+
+        composition.editor.check_requested.emit()
+
+        kind, result, note = composition.shown[0]
+        assert result.outcome == ssh_check.NO_KEY
+        assert not sentinel.exists()
+
+    def test_the_busy_cursor_is_restored(
+        self, recording_composition, fake_ssh, fake_home, valid_values, qapp,
+    ):
+        """After the check the wait cursor and the status message are gone."""
+        composition = recording_composition
+        _give_key(fake_home)
+        fake_ssh.set_login_body(_ok_body())
+        composition.editor.set_values(valid_values)
+
+        composition.editor.check_requested.emit()
+
+        assert QApplication.overrideCursor() is None
+        assert composition.editor.status_bar.currentMessage() == ""
+
+    def test_restored_on_crash(
+        self, recording_composition, fake_ssh, fake_home, valid_values,
+        monkeypatch, qapp,
+    ):
+        """A crashed check still leaves the editor's busy state cleared.
+
+        The handler is called directly: PyQt6 aborts the process on an
+        unhandled exception raised inside a slot, so the crash is
+        simulated one Python frame below the signal dispatch.
+        """
+        composition = recording_composition
+        composition.editor.set_values(valid_values)
+
+        def crashing_check(*args, **kwargs):
+            raise RuntimeError("check exploded")
+
+        monkeypatch.setattr(ssh_check, "check_login", crashing_check)
+        with pytest.raises(RuntimeError):
+            composition.controller._check_connection()
+
+        assert QApplication.overrideCursor() is None
+        assert composition.editor.status_bar.currentMessage() == ""

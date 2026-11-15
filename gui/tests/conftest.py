@@ -1,6 +1,7 @@
 """Shared fixtures and helpers for the vt-tunnel GUI test suite."""
 
 import os
+from types import SimpleNamespace
 
 # Force Qt onto its offscreen platform before anything imports Qt: the test
 # suite runs headless, and Qt would otherwise try to open a real display.
@@ -10,6 +11,11 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from vt_tunnel_gui import config_schema
+from vt_tunnel_gui.controller import Controller
+from vt_tunnel_gui.models.model import Model
+from vt_tunnel_gui.views.connection_view import ConnectionEditor
+from vt_tunnel_gui.views import check_result_view
+from vt_tunnel_gui.views.view import MainWindow
 
 
 @pytest.fixture(scope="session")
@@ -301,3 +307,81 @@ def fake_home(tmp_path, monkeypatch):
     (home / ".ssh").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     return home
+
+
+# --- Part 5: the app composition -----------------------------------------
+
+
+@pytest.fixture
+def app_composition(connections_dir, qapp):
+    """The whole application, wired: model, windows and controller.
+
+    Builds exactly what the controller receives — the model over the
+    temporary connections directory, the main window, the editor dialog
+    parented to it, and the controller wiring them (no quit callable,
+    no tray). The controller's constructor has already performed the
+    initial reload, so the list is populated on return.
+    """
+    model = Model(str(connections_dir))
+    window = MainWindow()
+    editor = ConnectionEditor(window)
+    controller = Controller(model, window, editor)
+    return SimpleNamespace(
+        directory=connections_dir,
+        model=model,
+        window=window,
+        editor=editor,
+        controller=controller,
+    )
+
+
+@pytest.fixture
+def recording_composition(app_composition, monkeypatch):
+    """The app composition with the check-result dialogs recorded.
+
+    Instead of opening the modal result dialog, both check-result
+    showers record what they were handed — (kind, result, note) with
+    kind "ssh" or "daemon" — on the composition's ``shown`` list, so a
+    test can assert on the result without a modal exec() call.
+    """
+    shown = []
+
+    def record(kind):
+        def shower(result, note="", parent=None):
+            shown.append((kind, result, note))
+
+        return shower
+
+    monkeypatch.setattr(
+        check_result_view, "show_ssh_result", record("ssh")
+    )
+    monkeypatch.setattr(
+        check_result_view, "show_daemon_result", record("daemon")
+    )
+    app_composition.shown = shown
+    return app_composition
+
+
+class _MessageBoxSpy:
+    """Stands in for the controller module's QMessageBox, recording."""
+
+    def __init__(self):
+        self.criticals = []
+
+    def critical(self, parent, title, text):
+        self.criticals.append((title, text))
+
+
+@pytest.fixture
+def controller_boxes(monkeypatch):
+    """Record the controller's own modal error boxes instead of showing.
+
+    The controller raises its "Can't check the connection" and "Delete
+    failed" boxes through QMessageBox.critical; the spy records
+    (title, text) pairs in its ``criticals`` list instead.
+    """
+    import vt_tunnel_gui.controller as controller_module
+
+    spy = _MessageBoxSpy()
+    monkeypatch.setattr(controller_module, "QMessageBox", spy)
+    return spy

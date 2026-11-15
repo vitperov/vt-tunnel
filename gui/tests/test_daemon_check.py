@@ -1227,3 +1227,136 @@ class TestMainWindowRows:
         window.set_checking(0, False)
         assert rows[0].check_button.text() == "Check daemon"
         assert QApplication.overrideCursor() is None
+
+
+# --- The main window's Check daemon button -------------------------------
+
+
+class TestDaemonButton:
+    """A row's Check daemon button checks that connection's service."""
+
+    def test_the_first_connection(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values,
+    ):
+        """Checking row 0 asks systemd about that connection's service."""
+        write_connection_file(valid_values)
+        fake_systemd.set_show_dump(_loaded_dump())
+        composition = recording_composition
+        composition.controller.reload()
+
+        composition.window.check_requested.emit(0)
+
+        assert "vt-tunnel@home.service" in fake_systemd.show_argv
+        kind, result, note = composition.shown[0]
+        assert kind == "daemon"
+        assert result.service == "vt-tunnel@home.service"
+        assert result.status == daemon_check.WORKING
+
+    def test_another_connection_checks_its_own_service(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values, other_valid_values,
+    ):
+        """Row 1's check is about row 1's connection, not row 0's."""
+        write_connection_file(valid_values)
+        write_connection_file(other_valid_values)
+        fake_systemd.set_show_dump(_loaded_dump())
+        composition = recording_composition
+        composition.controller.reload()
+
+        composition.window.check_requested.emit(1)
+
+        assert "vt-tunnel@home.service" in fake_systemd.show_argv
+        kind, result, note = composition.shown[0]
+        assert result.service == "vt-tunnel@home.service"
+
+    def test_failure_shown(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values,
+    ):
+        """A failed service reaches the result dialog as a failure."""
+        write_connection_file(valid_values)
+        fake_systemd.set_show_dump(
+            "\n".join(
+                [
+                    "LoadState=loaded",
+                    "LoadError=0",
+                    "ActiveState=failed",
+                    "SubState=exit-failed",
+                    "UnitFileState=enabled",
+                    "Result=exit-code",
+                    "ExecMainStatus=1",
+                    "NRestarts=0",
+                    "ActiveEnterTimestamp=Tue 2026-01-13 10:00:00 UTC",
+                    "",
+                ]
+            )
+        )
+        composition = recording_composition
+        composition.controller.reload()
+
+        composition.window.check_requested.emit(0)
+
+        kind, result, note = composition.shown[0]
+        assert result.status == daemon_check.FAILED
+        assert "exit code 1" in result.message
+
+    def test_button_and_cursor_restored(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values, qapp,
+    ):
+        """After the check the row's button and the cursor are back."""
+        write_connection_file(valid_values)
+        fake_systemd.set_show_dump(_loaded_dump())
+        composition = recording_composition
+        composition.controller.reload()
+
+        composition.window.check_requested.emit(0)
+
+        row = composition.window.findChildren(ConnectionRow)[0]
+        assert row.check_button.text() == "Check daemon"
+        assert QApplication.overrideCursor() is None
+
+    def test_restored_on_crash(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values, monkeypatch, qapp,
+    ):
+        """A crashed check still restores the row and the cursor.
+
+        The handler is called directly: PyQt6 aborts the process on an
+        unhandled exception raised inside a slot, so the crash is
+        simulated one Python frame below the signal dispatch.
+        """
+        write_connection_file(valid_values)
+        composition = recording_composition
+        composition.controller.reload()
+
+        def crashing_check(*args, **kwargs):
+            raise RuntimeError("check exploded")
+
+        monkeypatch.setattr(daemon_check, "check", crashing_check)
+        with pytest.raises(RuntimeError):
+            composition.controller._check_daemon(0)
+
+        row = composition.window.findChildren(ConnectionRow)[0]
+        assert row.check_button.text() == "Check daemon"
+        assert QApplication.overrideCursor() is None
+
+    def test_the_daemon_check_does_not_touch_the_editor(
+        self, recording_composition, fake_systemd, write_connection_file,
+        valid_values, other_valid_values,
+    ):
+        """Checking a daemon leaves an open editor exactly as it was."""
+        write_connection_file(valid_values)
+        write_connection_file(other_valid_values)
+        fake_systemd.set_show_dump(_loaded_dump())
+        composition = recording_composition
+        composition.controller.reload()
+        composition.window.edit_requested.emit(0)
+        composition.editor.field_edits["REMOTE_USER"].setText("half-typed")
+
+        composition.window.check_requested.emit(1)
+
+        assert composition.editor.isVisible()
+        assert composition.editor.values()["REMOTE_USER"] == "half-typed"
+        assert composition.shown[0][0] == "daemon"
