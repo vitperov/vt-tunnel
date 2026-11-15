@@ -1,3 +1,14 @@
+vt-tunnel-gui (0.2.0) UNRELEASED; urgency=medium
+
+  * Rework the GUI into a per-connection manager: list, create, edit, rename
+    and delete connection files under /etc/vt-tunnel/connections.d/ with
+    strict validation
+  * Add an ssh login check and a daemon/service check for each connection,
+    with copyable commands and suggestions on failure
+  * Add a pytest test suite
+
+ -- Vitaly Perov <vitperov@gmail.com>  Sun, 15 Nov 2026 05:23:07 +0200
+
 vt-tunnel-gui (0.1.0) UNRELEASED; urgency=medium
 
   * Initial packaging of the GUI stub
