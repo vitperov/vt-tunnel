@@ -1,0 +1,11 @@
+[Unit]
+Description="vt-tunnel@%i: ssh tunnel that allows you to bind you local ports (http-server, ssh and etc) to your remote server with external IP and domain name."
+After=multi-user.target network.target
+[Service]
+Type=simple
+EnvironmentFile=/etc/vt-tunnel/connections.d/%i.conf
+ExecStart=/usr/bin/sudo su -s /bin/bash -c 'autossh -N -p ${REMOTE_SERVER_SSH_PORT} ${REMOTE_USER}@${REMOTE_SERVER} -R ${REMOTE_PORT}:localhost:${LOCAL_PORT}' ${RUN_DAEMON_USER}
+Restart=always
+RestartSec=30
+[Install]
+WantedBy=multi-user.target

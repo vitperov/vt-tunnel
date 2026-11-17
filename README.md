@@ -37,12 +37,14 @@ no third-party tunnel services.
 Download the latest `.deb` from [Releases](https://github.com/vitperov/vt-tunnel/releases), then:
 
 ```bash
-sudo dpkg -i package-vt-tunnel_1.1.2_all.deb
+sudo dpkg -i package-vt-tunnel_2.0.0_all.deb
 ```
 
 This installs:
-- `vt-tunnel.service` — systemd unit
-- `/etc/systemd/vt-tunnel.cfg` — config file
+- `vt-tunnel@.service` — systemd template unit; every connection runs
+  as its own service instance `vt-tunnel@<name>.service`
+- `/etc/vt-tunnel/connections.d/` — directory holding one `<name>.conf`
+  file per connection, plus a starter `example.conf`
 
 ## Quick start
 
@@ -53,33 +55,46 @@ This installs:
    ssh-copy-id user_on_your_server@myserver.com
    ```
 
-1. Edit `/etc/systemd/vt-tunnel.cfg`:
+1. Copy the example to a named connection — the file name is the
+   connection's name:
 
    ```bash
-   RUN_DAEMON_USER=your_local_user
+   sudo cp /etc/vt-tunnel/connections.d/example.conf \
+           /etc/vt-tunnel/connections.d/home.conf
+   ```
 
-   REMOTE_USER=user_on_your_server
-   REMOTE_SERVER=myserver.com
-   REMOTE_SSH_PORT=22
+2. Edit the copy (the keys are described in
+   [gui/doc/config.md](gui/doc/config.md)):
 
-   LOCAL_PORT1=22
-   REMOTE_PORT1=5001
+   ```bash
+   sudoedit /etc/vt-tunnel/connections.d/home.conf
    ```
 
    With this config, port `22` on this machine shows up as port `5001`
-   on `myserver.com`.
+   on `myserver.com`. (`ENABLED` is not used yet — the tunnel is
+   switched on by enabling its service instance, see step 3.)
 
-2. Enable and start the service:
+3. Enable and start this connection's instance:
 
    ```bash
-   sudo systemctl enable --now vt-tunnel
+   sudo systemctl enable --now vt-tunnel@home
    ```
 
-3. From anywhere, connect back:
+4. From anywhere, connect back:
 
    ```bash
    ssh -p 5001 your_local_user@myserver.com
    ```
+
+Every connection file runs as its own service instance, so several
+tunnels can run at once — just add more files. Applying an edit to a
+running connection means restarting its instance
+(`sudo systemctl restart vt-tunnel@home`).
+
+Don't want to hand-edit? The `vt-tunnel-gui` package installs a desktop
+app that manages the connection files for you — creating, editing,
+renaming and deleting them, and checking each connection's ssh access
+and daemon state.
 
 ## Building from source
 
@@ -100,16 +115,18 @@ The package lands in `daemon/build/`.
 
 ## Future plans
 
-vt-tunnel is functional but minimal. What's on the roadmap:
+vt-tunnel is functional but minimal. Multi-connection support is done:
+every connection file under `/etc/vt-tunnel/connections.d/` runs as its
+own service instance, so several tunnels run at once. The
+`vt-tunnel-gui` package installs a desktop app that manages connection
+files — create, edit, rename and delete them, and check the daemon
+state and ssh access of each connection. What's still on the roadmap:
 
-- **Multiple ports.** Right now the config accepts a single `LOCAL_PORT1` /
-  `REMOTE_PORT1` pair. Planned: any number of pairs (`LOCAL_PORT2`,
-  `REMOTE_PORT2`, ...), so one tunnel can expose SSH alongside a web UI,
-  or a VNC/RDP remote desktop.
-- **Config GUI.** Editing `/etc/systemd/vt-tunnel.cfg` by hand works,
-  but a small desktop app for editing it (and toggling the service)
-  would make setup friendlier — especially on a prototype at a
-  customer's site.
+- **A privileged polkit helper**, so the GUI can write connection files
+  and restart services without running as root.
+- **A system tray icon** — state display and enable/disable from the
+  tray.
+- **A desktop-entry icon.**
 
 ## License
 
